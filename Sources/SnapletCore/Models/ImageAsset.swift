@@ -6,6 +6,7 @@ public struct ImageAsset: Identifiable, Codable, Equatable, Sendable {
     public let storedFilename: String
     public let relativePath: String
     public let byteSize: Int64
+    public let isFavorite: Bool
     public let importedAt: Date
 
     public init(
@@ -14,6 +15,7 @@ public struct ImageAsset: Identifiable, Codable, Equatable, Sendable {
         storedFilename: String,
         relativePath: String,
         byteSize: Int64,
+        isFavorite: Bool,
         importedAt: Date
     ) {
         self.id = id
@@ -21,6 +23,7 @@ public struct ImageAsset: Identifiable, Codable, Equatable, Sendable {
         self.storedFilename = storedFilename
         self.relativePath = relativePath
         self.byteSize = byteSize
+        self.isFavorite = isFavorite
         self.importedAt = importedAt
     }
 

@@ -58,10 +58,18 @@ public final class ImageLibraryStore: @unchecked Sendable {
             """,
             in: database
         )
+        try Self.ensureFavoriteColumn(in: database)
         try Self.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_images_imported_at
             ON images(imported_at DESC);
+            """,
+            in: database
+        )
+        try Self.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_images_is_favorite
+            ON images(is_favorite, imported_at DESC);
             """,
             in: database
         )
@@ -84,15 +92,28 @@ public final class ImageLibraryStore: @unchecked Sendable {
         }
     }
 
-    public func randomAsset() throws -> ImageAsset? {
+    public func randomAsset(favoritesOnly: Bool = false) throws -> ImageAsset? {
         try withLock {
+            let sql: String
+            if favoritesOnly {
+                sql = """
+                    SELECT id, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+                    FROM images
+                    WHERE is_favorite = 1
+                    ORDER BY RANDOM()
+                    LIMIT 1;
+                    """
+            } else {
+                sql = """
+                    SELECT id, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+                    FROM images
+                    ORDER BY RANDOM()
+                    LIMIT 1;
+                    """
+            }
+
             let statement = try Self.prepare(
-                """
-                SELECT id, original_filename, stored_filename, relative_path, byte_size, imported_at
-                FROM images
-                ORDER BY RANDOM()
-                LIMIT 1;
-                """,
+                sql,
                 in: database
             )
             defer { sqlite3_finalize(statement) }
@@ -109,7 +130,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
         try withLock {
             let statement = try Self.prepare(
                 """
-                SELECT id, original_filename, stored_filename, relative_path, byte_size, imported_at
+                SELECT id, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
                 FROM images
                 ORDER BY imported_at DESC
                 LIMIT ?;
@@ -154,6 +175,33 @@ public final class ImageLibraryStore: @unchecked Sendable {
         }
     }
 
+    public func updateFavoriteStatus(assetID: UUID, isFavorite: Bool) throws -> ImageAsset? {
+        try withLock {
+            guard try asset(withID: assetID) != nil else {
+                return nil
+            }
+
+            let statement = try Self.prepare(
+                """
+                UPDATE images
+                SET is_favorite = ?
+                WHERE id = ?;
+                """,
+                in: database
+            )
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int(statement, 1, isFavorite ? 1 : 0)
+            sqlite3_bind_text(statement, 2, assetID.uuidString, -1, sqliteTransient)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
+            }
+
+            return try asset(withID: assetID)
+        }
+    }
+
     private func importImage(from externalURL: URL) throws -> ImageAsset {
         try importImage(from: externalURL, originalFilenameOverride: nil)
     }
@@ -195,6 +243,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
             storedFilename: storedFilename,
             relativePath: "Images/\(storedFilename)",
             byteSize: byteSize,
+            isFavorite: false,
             importedAt: Date()
         )
 
@@ -207,8 +256,9 @@ public final class ImageLibraryStore: @unchecked Sendable {
                     stored_filename,
                     relative_path,
                     byte_size,
+                    is_favorite,
                     imported_at
-                ) VALUES (?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?);
                 """,
                 in: database
             )
@@ -219,7 +269,8 @@ public final class ImageLibraryStore: @unchecked Sendable {
             sqlite3_bind_text(statement, 3, asset.storedFilename, -1, sqliteTransient)
             sqlite3_bind_text(statement, 4, asset.relativePath, -1, sqliteTransient)
             sqlite3_bind_int64(statement, 5, asset.byteSize)
-            sqlite3_bind_double(statement, 6, asset.importedAt.timeIntervalSince1970)
+            sqlite3_bind_int(statement, 6, asset.isFavorite ? 1 : 0)
+            sqlite3_bind_double(statement, 7, asset.importedAt.timeIntervalSince1970)
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
@@ -272,6 +323,58 @@ public final class ImageLibraryStore: @unchecked Sendable {
         return statement
     }
 
+    private static func ensureFavoriteColumn(in database: OpaquePointer?) throws {
+        guard try tableHasColumn(named: "is_favorite", in: "images", database: database) == false else {
+            return
+        }
+
+        try execute(
+            """
+            ALTER TABLE images
+            ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+            """,
+            in: database
+        )
+    }
+
+    private static func tableHasColumn(named columnName: String, in tableName: String, database: OpaquePointer?) throws -> Bool {
+        let statement = try prepare("PRAGMA table_info(\(tableName));", in: database)
+        defer { sqlite3_finalize(statement) }
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let namePointer = sqlite3_column_text(statement, 1) else {
+                continue
+            }
+
+            if String(cString: namePointer) == columnName {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func asset(withID assetID: UUID) throws -> ImageAsset? {
+        let statement = try Self.prepare(
+            """
+            SELECT id, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+            FROM images
+            WHERE id = ?
+            LIMIT 1;
+            """,
+            in: database
+        )
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, assetID.uuidString, -1, sqliteTransient)
+
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return nil
+        }
+
+        return try Self.makeAsset(from: statement)
+    }
+
     private static func makeAsset(from statement: OpaquePointer?) throws -> ImageAsset {
         guard
             let idPointer = sqlite3_column_text(statement, 0),
@@ -293,6 +396,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
             storedFilename: String(cString: storedFilenamePointer),
             relativePath: String(cString: relativePathPointer),
             byteSize: sqlite3_column_int64(statement, 4),
+            isFavorite: sqlite3_column_int(statement, 6) != 0,
             importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
         )
     }

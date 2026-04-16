@@ -56,15 +56,24 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
         }
     }
 
-    private func handleRandomImageRequest(from peerID: MCPeerID, purpose: ImageRequestPurpose) {
+    private func handleRandomImageRequest(
+        from peerID: MCPeerID,
+        purpose: ImageRequestPurpose,
+        scope: ImageSelectionScope
+    ) {
         do {
             let imageCount = try imageLibraryStore.assetCount()
             try sendMessage(.libraryStatus(count: imageCount), to: [peerID])
 
-            guard let asset = try imageLibraryStore.randomAsset() else {
-                try sendMessage(.failure("No images have been imported yet."), to: [peerID])
+            let favoritesOnly = scope == .favorites
+            guard let asset = try imageLibraryStore.randomAsset(favoritesOnly: favoritesOnly) else {
+                let failureMessage = favoritesOnly
+                    ? "No favorite images are marked yet."
+                    : "No images have been imported yet."
+                try sendMessage(.failure(failureMessage), to: [peerID])
                 updatePublishedState {
-                    $0.appendLog("Random image request from \(peerID.displayName) failed because the library is empty.")
+                    let scopeDescription = favoritesOnly ? "favorites" : "library"
+                    $0.appendLog("Random image request from \(peerID.displayName) failed because the \(scopeDescription) is empty.")
                 }
                 return
             }
@@ -74,10 +83,11 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
                 assetID: asset.id,
                 resourceName: resourceName,
                 originalFilename: asset.originalFilename,
-                byteSize: asset.byteSize
+                byteSize: asset.byteSize,
+                isFavorite: asset.isFavorite
             )
 
-            try sendMessage(.transferReady(descriptor, purpose: purpose), to: [peerID])
+            try sendMessage(.transferReady(descriptor, purpose: purpose, scope: scope), to: [peerID])
 
             let fileURL = asset.fileURL(relativeTo: imageLibraryStore.rootDirectory)
             session.sendResource(at: fileURL, withName: resourceName, toPeer: peerID) { [weak self] error in
@@ -91,7 +101,8 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
                     try? self.sendMessage(.failure("Transfer failed: \(error.localizedDescription)"), to: [peerID])
                 } else {
                     self.updatePublishedState {
-                        $0.appendLog("Sent \(asset.originalFilename) to \(peerID.displayName).")
+                        let scopeDescription = favoritesOnly ? "favorite" : "random"
+                        $0.appendLog("Sent \(scopeDescription) image \(asset.originalFilename) to \(peerID.displayName).")
                     }
                 }
             }
@@ -146,7 +157,8 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
                 assetID: importedAsset.id,
                 resourceName: importedAsset.storedFilename,
                 originalFilename: importedAsset.originalFilename,
-                byteSize: importedAsset.byteSize
+                byteSize: importedAsset.byteSize,
+                isFavorite: importedAsset.isFavorite
             )
 
             try sendMessage(.uploadComplete(descriptor, count: libraryCount), to: [peerID])
@@ -162,6 +174,31 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
                 $0.appendLog("Failed to index upload \(resourceName): \(error.localizedDescription)")
             }
             try? sendMessage(.failure("The Mac received \(resourceName) but could not import it: \(error.localizedDescription)"), to: [peerID])
+        }
+    }
+
+    private func handleFavoriteUpdate(assetID: UUID, isFavorite: Bool, from peerID: MCPeerID) {
+        do {
+            guard let updatedAsset = try imageLibraryStore.updateFavoriteStatus(assetID: assetID, isFavorite: isFavorite) else {
+                try sendMessage(.failure("That image is no longer indexed on the Mac host."), to: [peerID])
+                updatePublishedState {
+                    $0.appendLog("Favorite update from \(peerID.displayName) failed because the asset was missing.")
+                }
+                return
+            }
+
+            try sendMessage(.favoriteStatusUpdated(assetID: updatedAsset.id, isFavorite: updatedAsset.isFavorite), to: [peerID])
+            updatePublishedState {
+                let favoriteState = updatedAsset.isFavorite ? "favorite" : "not favorite"
+                $0.appendLog("Marked \(updatedAsset.originalFilename) as \(favoriteState) for \(peerID.displayName).")
+            }
+            onLibraryMutated?()
+        } catch {
+            updatePublishedState {
+                $0.lastError = error.localizedDescription
+                $0.appendLog("Favorite update failed: \(error.localizedDescription)")
+            }
+            try? sendMessage(.failure("Favorite update failed: \(error.localizedDescription)"), to: [peerID])
         }
     }
 
@@ -264,11 +301,21 @@ extension PeerHostService: MCSessionDelegate {
 
             do {
                 let message = try PeerMessage.decoded(from: data)
-                if message.kind == .requestRandomImage {
+                switch message.kind {
+                case .requestRandomImage:
                     self.handleRandomImageRequest(
                         from: peerID,
-                        purpose: message.requestPurpose ?? .displayNow
+                        purpose: message.requestPurpose ?? .displayNow,
+                        scope: message.selectionScope ?? .all
                     )
+                case .setFavorite:
+                    guard let assetID = message.assetID, let favoriteValue = message.favoriteValue else {
+                        try? self.sendMessage(.failure("Favorite update was missing the asset identifier."), to: [peerID])
+                        return
+                    }
+                    self.handleFavoriteUpdate(assetID: assetID, isFavorite: favoriteValue, from: peerID)
+                case .libraryStatus, .transferReady, .uploadComplete, .favoriteStatusUpdated, .failure:
+                    break
                 }
             } catch {
                 self.updatePublishedState {

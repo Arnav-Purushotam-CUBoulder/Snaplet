@@ -34,16 +34,20 @@ enum SnapletSmokeTests {
         _ = try store.importImages(from: [secondImage])
         Thread.sleep(forTimeInterval: 0.02)
         let uploadedAsset = try store.importReceivedFile(at: receivedImage, originalFilename: "three.png")
+        let favoritedAsset = try store.updateFavoriteStatus(assetID: uploadedAsset.id, isFavorite: true)
         let status = try store.libraryStatus(limit: 2)
         let randomAsset = try store.randomAsset()
+        let favoriteRandomAsset = try store.randomAsset(favoritesOnly: true)
 
         try assert(importedAssets.count == 1, "Expected first import call to return exactly one asset.")
         try assert(status.imageCount == 3, "Expected SQLite index to contain three images.")
         try assert(status.recentAssets.first?.originalFilename == "three.png", "Expected recent assets to be sorted newest first.")
         try assert(randomAsset != nil, "Expected random asset query to return a result.")
+        try assert(favoriteRandomAsset?.id == uploadedAsset.id, "Expected favorite-only random query to return the favorited asset.")
         try assert(fileManager.fileExists(atPath: importedAssets[0].fileURL(relativeTo: temporaryRoot).path), "Expected copied image to exist in local store.")
         try assert(uploadedAsset.originalFilename == "three.png", "Expected received uploads to preserve the provided original filename.")
         try assert(uploadedAsset.storedFilename.hasSuffix(".png"), "Expected received uploads to use the original filename extension when storing the file.")
+        try assert(favoritedAsset?.isFavorite == true, "Expected favorite update to persist in SQLite.")
     }
 
     private static func verifyPeerMessageRoundTrip() throws {
@@ -52,9 +56,11 @@ enum SnapletSmokeTests {
                 assetID: UUID(),
                 resourceName: "asset.jpg",
                 originalFilename: "sample.jpg",
-                byteSize: 2_048
+                byteSize: 2_048,
+                isFavorite: true
             ),
-            purpose: .displayNow
+            purpose: .displayNow,
+            scope: .favorites
         )
         let encoded = try originalMessage.encoded()
         let decoded = try PeerMessage.decoded(from: encoded)

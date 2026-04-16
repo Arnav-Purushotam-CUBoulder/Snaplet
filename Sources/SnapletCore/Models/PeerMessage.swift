@@ -10,6 +10,8 @@ public enum PeerMessageKind: String, Codable, Sendable {
     case libraryStatus
     case transferReady
     case uploadComplete
+    case setFavorite
+    case favoriteStatusUpdated
     case failure
 }
 
@@ -18,22 +20,30 @@ public enum ImageRequestPurpose: String, Codable, Sendable {
     case prefetch
 }
 
+public enum ImageSelectionScope: String, Codable, Sendable {
+    case all
+    case favorites
+}
+
 public struct ResourceDescriptor: Codable, Equatable, Sendable {
     public let assetID: UUID
     public let resourceName: String
     public let originalFilename: String
     public let byteSize: Int64
+    public let isFavorite: Bool
 
     public init(
         assetID: UUID,
         resourceName: String,
         originalFilename: String,
-        byteSize: Int64
+        byteSize: Int64,
+        isFavorite: Bool
     ) {
         self.assetID = assetID
         self.resourceName = resourceName
         self.originalFilename = originalFilename
         self.byteSize = byteSize
+        self.isFavorite = isFavorite
     }
 }
 
@@ -43,35 +53,68 @@ public struct PeerMessage: Codable, Equatable, Sendable {
     public let resource: ResourceDescriptor?
     public let errorMessage: String?
     public let requestPurpose: ImageRequestPurpose?
+    public let selectionScope: ImageSelectionScope?
+    public let assetID: UUID?
+    public let favoriteValue: Bool?
 
     public init(
         kind: PeerMessageKind,
         libraryCount: Int? = nil,
         resource: ResourceDescriptor? = nil,
         errorMessage: String? = nil,
-        requestPurpose: ImageRequestPurpose? = nil
+        requestPurpose: ImageRequestPurpose? = nil,
+        selectionScope: ImageSelectionScope? = nil,
+        assetID: UUID? = nil,
+        favoriteValue: Bool? = nil
     ) {
         self.kind = kind
         self.libraryCount = libraryCount
         self.resource = resource
         self.errorMessage = errorMessage
         self.requestPurpose = requestPurpose
+        self.selectionScope = selectionScope
+        self.assetID = assetID
+        self.favoriteValue = favoriteValue
     }
 
-    public static func requestRandomImage(purpose: ImageRequestPurpose) -> PeerMessage {
-        PeerMessage(kind: .requestRandomImage, requestPurpose: purpose)
+    public static func requestRandomImage(
+        purpose: ImageRequestPurpose,
+        scope: ImageSelectionScope
+    ) -> PeerMessage {
+        PeerMessage(
+            kind: .requestRandomImage,
+            requestPurpose: purpose,
+            selectionScope: scope
+        )
     }
 
     public static func libraryStatus(count: Int) -> PeerMessage {
         PeerMessage(kind: .libraryStatus, libraryCount: count)
     }
 
-    public static func transferReady(_ descriptor: ResourceDescriptor, purpose: ImageRequestPurpose) -> PeerMessage {
-        PeerMessage(kind: .transferReady, resource: descriptor, requestPurpose: purpose)
+    public static func transferReady(
+        _ descriptor: ResourceDescriptor,
+        purpose: ImageRequestPurpose,
+        scope: ImageSelectionScope
+    ) -> PeerMessage {
+        PeerMessage(
+            kind: .transferReady,
+            resource: descriptor,
+            requestPurpose: purpose,
+            selectionScope: scope
+        )
     }
 
     public static func uploadComplete(_ descriptor: ResourceDescriptor, count: Int) -> PeerMessage {
         PeerMessage(kind: .uploadComplete, libraryCount: count, resource: descriptor)
+    }
+
+    public static func setFavorite(assetID: UUID, isFavorite: Bool) -> PeerMessage {
+        PeerMessage(kind: .setFavorite, assetID: assetID, favoriteValue: isFavorite)
+    }
+
+    public static func favoriteStatusUpdated(assetID: UUID, isFavorite: Bool) -> PeerMessage {
+        PeerMessage(kind: .favoriteStatusUpdated, assetID: assetID, favoriteValue: isFavorite)
     }
 
     public static func failure(_ message: String) -> PeerMessage {

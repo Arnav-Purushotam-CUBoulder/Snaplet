@@ -24,5 +24,7 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Snaplet Viewer discovers your Mac host and requests images over a direct local session.</string>
+	<key>UILaunchScreen</key>
+	<dict/>
 </dict>
 </plist>

@@ -301,6 +301,12 @@ private struct RecentImagesPanel: View {
                             }
 
                             Spacer(minLength: 12)
+
+                            if asset.isFavorite {
+                                Image(systemName: "star.fill")
+                                    .font(.headline)
+                                    .foregroundStyle(Color(red: 0.83, green: 0.62, blue: 0.15))
+                            }
                         }
                         .padding(16)
                         .background(

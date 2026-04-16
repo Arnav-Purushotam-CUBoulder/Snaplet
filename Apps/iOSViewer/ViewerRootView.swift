@@ -5,6 +5,7 @@ import PhotosUI
 private enum ViewerScreenMode: String, CaseIterable, Identifiable {
     case menu = "Menu"
     case feed = "Feed"
+    case favorites = "Favorites"
 
     var id: Self { self }
 
@@ -14,6 +15,41 @@ private enum ViewerScreenMode: String, CaseIterable, Identifiable {
             "slider.horizontal.3"
         case .feed:
             "rectangle.stack.fill"
+        case .favorites:
+            "star.fill"
+        }
+    }
+
+    var selectionScope: ImageSelectionScope? {
+        switch self {
+        case .menu:
+            nil
+        case .feed:
+            .all
+        case .favorites:
+            .favorites
+        }
+    }
+
+    var emptyStateTitle: String {
+        switch self {
+        case .menu:
+            "Menu"
+        case .feed:
+            "No Image Yet"
+        case .favorites:
+            "No Favorite Images"
+        }
+    }
+
+    var emptyStateMessage: String {
+        switch self {
+        case .menu:
+            ""
+        case .feed:
+            "Swipe up to pull a random image from your Mac host."
+        case .favorites:
+            "Mark images with the star in Feed, then switch back here for a favorites-only shuffle."
         }
     }
 }
@@ -30,28 +66,36 @@ struct ViewerRootView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            backgroundSurface
+        GeometryReader { proxy in
+            let topInset = proxy.safeAreaInsets.top
 
-            Group {
-                switch selectedScreen {
-                case .menu:
-                    menuScreen
-                        .transition(.opacity.combined(with: .move(edge: .leading)))
-                case .feed:
-                    feedScreen
-                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+            ZStack(alignment: .top) {
+                backgroundSurface
+
+                Group {
+                    switch selectedScreen {
+                    case .menu:
+                        menuScreen(topInset: topInset)
+                            .transition(.opacity.combined(with: .move(edge: .leading)))
+                    case .feed:
+                        viewerScreen(for: .feed)
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    case .favorites:
+                        viewerScreen(for: .favorites)
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+
+                ViewerModeSwitcher(selectedMode: $selectedScreen)
+                    .frame(maxWidth: 324)
+                    .padding(.horizontal, 18)
+                    .padding(.top, topInset + 6)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
-
-            ViewerModeSwitcher(selectedMode: $selectedScreen)
-                .padding(.horizontal, 20)
-                .safeAreaPadding(.top, 8)
+            .ignoresSafeArea()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .ignoresSafeArea()
         .animation(.spring(response: 0.42, dampingFraction: 0.86), value: selectedScreen)
         .onAppear {
             service.start()
@@ -60,8 +104,8 @@ struct ViewerRootView: View {
             service.stop()
         }
         .onChange(of: selectedScreen) { _, screen in
-            guard screen == .feed, service.currentImage == nil, !service.isLoadingImage else { return }
-            service.requestNextImage()
+            guard let scope = screen.selectionScope else { return }
+            service.setSelectionScope(scope)
         }
         .onChange(of: selectedUploadItems) { _, items in
             guard !items.isEmpty else { return }
@@ -88,14 +132,14 @@ struct ViewerRootView: View {
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
-            case .feed:
+            case .feed, .favorites:
                 Color.black
             }
         }
         .ignoresSafeArea()
     }
 
-    private var menuScreen: some View {
+    private func menuScreen(topInset: CGFloat) -> some View {
         let uploadButtonTitle = service.isUploadingImages ? "Uploading…" : "Upload from iPhone"
 
         return ScrollView(showsIndicators: false) {
@@ -114,7 +158,7 @@ struct ViewerRootView: View {
                                 .font(.system(size: 34, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
 
-                            Text("Menu and feed are now separate. Use the switcher above to jump into the full-screen viewer.")
+                            Text("Use the fixed switcher above to jump between the dashboard, the full-screen feed, and your favorites-only shuffle.")
                                 .font(.subheadline)
                                 .foregroundStyle(.white.opacity(0.8))
                         }
@@ -145,14 +189,11 @@ struct ViewerRootView: View {
                     }
                 }
 
-                ViewerMenuCard(title: "Actions", subtitle: "Jump into the viewer or send new lossless images to the Mac host.") {
+                ViewerMenuCard(title: "Actions", subtitle: "Jump into the viewer or send up to 100 lossless images to the Mac host.") {
                     VStack(spacing: 12) {
                         Button {
                             withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
                                 selectedScreen = .feed
-                            }
-                            if service.currentImage == nil {
-                                service.requestNextImage()
                             }
                         } label: {
                             Label(service.currentImage == nil ? "Open Feed" : "Back to Feed", systemImage: "arrow.up.forward.app")
@@ -163,10 +204,11 @@ struct ViewerRootView: View {
                         .tint(Color(red: 0.80, green: 0.38, blue: 0.15))
 
                         Button {
-                            service.requestNextImage()
                             withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
                                 selectedScreen = .feed
                             }
+                            service.setSelectionScope(.all)
+                            service.requestNextImage(in: .all)
                         } label: {
                             Label("Load Random Image", systemImage: "shuffle")
                                 .font(.headline)
@@ -177,7 +219,7 @@ struct ViewerRootView: View {
 
                         PhotosPicker(
                             selection: $selectedUploadItems,
-                            maxSelectionCount: 20,
+                            maxSelectionCount: 100,
                             matching: .images,
                             preferredItemEncoding: .current,
                             photoLibrary: .shared()
@@ -198,6 +240,12 @@ struct ViewerRootView: View {
                             .foregroundStyle(.white)
                             .lineLimit(3)
 
+                        if service.currentAssetID != nil {
+                            Text(service.currentImageIsFavorite ? "Marked as favorite" : "Not marked as favorite")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(service.currentImageIsFavorite ? Color.yellow.opacity(0.95) : .white.opacity(0.75))
+                        }
+
                         if let uploadStatusMessage = service.uploadStatusMessage {
                             Text(uploadStatusMessage)
                                 .font(.subheadline.weight(.semibold))
@@ -213,13 +261,15 @@ struct ViewerRootView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .safeAreaPadding(.top, 72)
+            .padding(.top, topInset + 44)
             .safeAreaPadding(.bottom, 28)
         }
     }
 
-    private var feedScreen: some View {
-        ZStack {
+    private func viewerScreen(for mode: ViewerScreenMode) -> some View {
+        let scope = mode.selectionScope ?? .all
+
+        return ZStack {
             Color.black
 
             if let image = service.currentImage {
@@ -246,28 +296,36 @@ struct ViewerRootView: View {
         .contentShape(Rectangle())
         .offset(y: feedDragOffset)
         .animation(.spring(response: 0.34, dampingFraction: 0.84), value: feedDragOffset)
-        .gesture(feedSwipeGesture)
+        .gesture(feedSwipeGesture(for: scope))
         .overlay {
             if service.currentImage == nil && !service.isLoadingImage {
                 VStack(spacing: 18) {
-                    Image(systemName: "photo.on.rectangle.angled")
+                    Image(systemName: mode == .favorites ? "star.square.on.square" : "photo.on.rectangle.angled")
                         .font(.system(size: 54, weight: .regular))
                         .foregroundStyle(.white.opacity(0.88))
 
-                    Text("No Image Yet")
+                    Text(mode.emptyStateTitle)
                         .font(.title.weight(.bold))
                         .foregroundStyle(.white)
 
-                    Text("Swipe up to pull a random image from your Mac host.")
+                    Text(mode.emptyStateMessage)
                         .font(.body)
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white.opacity(0.8))
                         .padding(.horizontal, 28)
 
+                    if let errorMessage = service.errorMessage {
+                        Text(errorMessage)
+                            .font(.footnote.weight(.semibold))
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(Color(red: 1.0, green: 0.80, blue: 0.75))
+                            .padding(.horizontal, 32)
+                    }
+
                     Button {
-                        service.requestNextImage()
+                        service.requestNextImage(in: scope)
                     } label: {
-                        Label("Load First Image", systemImage: "arrow.up")
+                        Label(scope == .favorites ? "Load Favorite" : "Load First Image", systemImage: "arrow.up")
                             .font(.headline)
                     }
                     .buttonStyle(.borderedProminent)
@@ -283,22 +341,50 @@ struct ViewerRootView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            if feedDragOffset < -8 {
-                Text("Release to load the next random image")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(.black.opacity(0.52))
-                    )
-                    .safeAreaPadding(.bottom, 32)
+            VStack(spacing: 10) {
+                if feedDragOffset < -8 {
+                    Text(scope == .favorites ? "Release to load the next favorite image" : "Release to load the next random image")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(.black.opacity(0.52))
+                        )
+                }
+
+                if service.currentAssetID != nil {
+                    Button {
+                        service.toggleFavorite()
+                    } label: {
+                        Group {
+                            if service.isUpdatingFavorite {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: service.currentImageIsFavorite ? "star.fill" : "star")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(service.currentImageIsFavorite ? Color.yellow : .white)
+                            }
+                        }
+                        .frame(width: 42, height: 42)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(
+                            Circle()
+                                .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(service.isUpdatingFavorite)
+                }
             }
+            .safeAreaPadding(.bottom, 18)
         }
     }
 
-    private var feedSwipeGesture: some Gesture {
+    private func feedSwipeGesture(for scope: ImageSelectionScope) -> some Gesture {
         DragGesture(minimumDistance: 22)
             .onChanged { value in
                 guard value.translation.height < 0 else { return }
@@ -319,7 +405,7 @@ struct ViewerRootView: View {
                 }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                    service.requestNextImage()
+                    service.requestNextImage(in: scope)
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
                         feedDragOffset = 0
                     }
@@ -380,11 +466,12 @@ private struct SelectedUploadFile: Transferable {
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(importedContentType: .image) { received in
             let sourceURL = received.file
-            let fileExtension = sourceURL.pathExtension
-            let filename = fileExtension.isEmpty
+            let sourceFilename = sourceURL.lastPathComponent
+            let fallbackFilename = sourceURL.pathExtension.isEmpty
                 ? "iphone-\(UUID().uuidString)"
-                : "iphone-\(UUID().uuidString).\(fileExtension)"
-            let destinationURL = FileManager.default.temporaryDirectory.appending(path: filename)
+                : "iphone-\(UUID().uuidString).\(sourceURL.pathExtension)"
+            let filename = sourceFilename.isEmpty ? fallbackFilename : sourceFilename
+            let destinationURL = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString)-\(filename)")
 
             if FileManager.default.fileExists(atPath: destinationURL.path) {
                 try FileManager.default.removeItem(at: destinationURL)
@@ -400,7 +487,7 @@ private struct ViewerModeSwitcher: View {
     @Binding var selectedMode: ViewerScreenMode
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             ForEach(ViewerScreenMode.allCases) { mode in
                 Button {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
@@ -408,10 +495,10 @@ private struct ViewerModeSwitcher: View {
                     }
                 } label: {
                     Label(mode.rawValue, systemImage: mode.systemImage)
-                        .font(.caption.weight(.semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(selectedMode == mode ? Color.black : .white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
+                        .padding(.vertical, 6)
                         .background(
                             Capsule(style: .continuous)
                                 .fill(selectedMode == mode ? .white : .white.opacity(0.08))
@@ -420,7 +507,7 @@ private struct ViewerModeSwitcher: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(4)
+        .padding(3)
         .background(.ultraThinMaterial, in: Capsule(style: .continuous))
         .overlay(
             Capsule(style: .continuous)
