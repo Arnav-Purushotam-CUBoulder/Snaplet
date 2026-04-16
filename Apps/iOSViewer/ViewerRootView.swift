@@ -58,6 +58,7 @@ private enum ViewerScreenMode: String, CaseIterable, Identifiable {
 struct ViewerRootView: View {
     @StateObject private var service: PeerViewerService
     @State private var feedDragOffset: CGFloat = 0
+    @State private var isAnimatingFeedAdvance = false
     @State private var selectedUploadItems: [PhotosPickerItem] = []
     @State private var selectedScreen: ViewerScreenMode = .menu
     @State private var viewerZoomScale: CGFloat = 1
@@ -113,6 +114,11 @@ struct ViewerRootView: View {
             service.stop()
         }
         .onChange(of: selectedScreen) { _, screen in
+            let resetTransaction = Transaction(animation: nil)
+            withTransaction(resetTransaction) {
+                feedDragOffset = 0
+                isAnimatingFeedAdvance = false
+            }
             guard let scope = screen.selectionScope else { return }
             service.setSelectionScope(scope)
         }
@@ -277,163 +283,216 @@ struct ViewerRootView: View {
 
     private func viewerScreen(for mode: ViewerScreenMode) -> some View {
         let scope = mode.selectionScope ?? .all
-        let canSwipeToAdvance = service.currentImage == nil || viewerZoomScale <= (viewerMinimumZoomScale + 0.01)
 
-        return ZStack {
-            Color.black
+        return GeometryReader { proxy in
+            let viewportHeight = max(proxy.size.height, 1)
+            let canSwipeToAdvance = service.currentImage != nil
+                && viewerZoomScale <= (viewerMinimumZoomScale + 0.01)
+                && !isAnimatingFeedAdvance
 
-            if let image = service.currentImage, let assetID = service.currentAssetID {
-                ZoomableImageSurface(
-                    image: image,
-                    assetID: assetID,
-                    zoomScale: $viewerZoomScale,
-                    minimumZoomScale: $viewerMinimumZoomScale
+            ZStack {
+                Color.black
+
+                if let currentImage = service.currentImage, let assetID = service.currentAssetID {
+                    if let nextImage = service.nextImage {
+                        StaticImageSurface(image: nextImage)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .offset(y: viewportHeight + feedDragOffset)
+                            .allowsHitTesting(false)
+                    }
+
+                    ZoomableImageSurface(
+                        image: currentImage,
+                        assetID: assetID,
+                        isSwipeEnabled: canSwipeToAdvance,
+                        onSwipeChanged: { translation in
+                            guard translation < 0 else { return }
+                            feedDragOffset = max(translation, -viewportHeight)
+                        },
+                        onSwipeEnded: { translation, verticalVelocity in
+                            handleFeedSwipeEnded(
+                                for: scope,
+                                translation: translation,
+                                verticalVelocity: verticalVelocity,
+                                viewportHeight: viewportHeight,
+                                enabled: canSwipeToAdvance
+                            )
+                        },
+                        zoomScale: $viewerZoomScale,
+                        minimumZoomScale: $viewerMinimumZoomScale
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .offset(y: feedDragOffset)
+                    .ignoresSafeArea()
+                }
+
+                LinearGradient(
+                    colors: [
+                        .black.opacity(0.32),
+                        .clear,
+                        .black.opacity(0.18)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .ignoresSafeArea()
+                .allowsHitTesting(false)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .overlay {
+                if service.currentImage == nil && !service.isLoadingImage {
+                    VStack(spacing: 18) {
+                        Image(systemName: mode == .favorites ? "star.square.on.square" : "photo.on.rectangle.angled")
+                            .font(.system(size: 54, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.88))
 
-            LinearGradient(
-                colors: [
-                    .black.opacity(0.32),
-                    .clear,
-                    .black.opacity(0.18)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .allowsHitTesting(false)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .offset(y: feedDragOffset)
-        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: feedDragOffset)
-        .gesture(feedSwipeGesture(for: scope, enabled: canSwipeToAdvance))
-        .overlay {
-            if service.currentImage == nil && !service.isLoadingImage {
-                VStack(spacing: 18) {
-                    Image(systemName: mode == .favorites ? "star.square.on.square" : "photo.on.rectangle.angled")
-                        .font(.system(size: 54, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.88))
+                        Text(mode.emptyStateTitle)
+                            .font(.title.weight(.bold))
+                            .foregroundStyle(.white)
 
-                    Text(mode.emptyStateTitle)
-                        .font(.title.weight(.bold))
-                        .foregroundStyle(.white)
-
-                    Text(mode.emptyStateMessage)
-                        .font(.body)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.white.opacity(0.8))
-                        .padding(.horizontal, 28)
-
-                    if let errorMessage = service.errorMessage {
-                        Text(errorMessage)
-                            .font(.footnote.weight(.semibold))
+                        Text(mode.emptyStateMessage)
+                            .font(.body)
                             .multilineTextAlignment(.center)
-                            .foregroundStyle(Color(red: 1.0, green: 0.80, blue: 0.75))
-                            .padding(.horizontal, 32)
-                    }
+                            .foregroundStyle(.white.opacity(0.8))
+                            .padding(.horizontal, 28)
 
-                    Button {
-                        service.requestNextImage(in: scope)
-                    } label: {
-                        Label(scope == .favorites ? "Load Favorite" : "Load First Image", systemImage: "arrow.up")
-                            .font(.headline)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color(red: 0.89, green: 0.48, blue: 0.20))
-                }
-            }
-
-            if service.isLoadingImage {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .tint(.white)
-                    .scaleEffect(1.5)
-            }
-        }
-        .overlay(alignment: .bottom) {
-            VStack(spacing: 10) {
-                if canSwipeToAdvance && feedDragOffset < -8 {
-                    Text(scope == .favorites ? "Release to load the next favorite image" : "Release to load the next random image")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(.black.opacity(0.52))
-                        )
-                }
-
-                if service.currentAssetID != nil {
-                    Button {
-                        service.toggleFavorite()
-                    } label: {
-                        Group {
-                            if service.isUpdatingFavorite {
-                                ProgressView()
-                                    .progressViewStyle(.circular)
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: service.currentImageIsFavorite ? "star.fill" : "star")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundStyle(service.currentImageIsFavorite ? Color.yellow : .white)
-                            }
+                        if let errorMessage = service.errorMessage {
+                            Text(errorMessage)
+                                .font(.footnote.weight(.semibold))
+                                .multilineTextAlignment(.center)
+                                .foregroundStyle(Color(red: 1.0, green: 0.80, blue: 0.75))
+                                .padding(.horizontal, 32)
                         }
-                        .frame(width: 42, height: 42)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(
-                            Circle()
-                                .strokeBorder(.white.opacity(0.16), lineWidth: 1)
-                        )
+
+                        Button {
+                            service.requestNextImage(in: scope)
+                        } label: {
+                            Label(scope == .favorites ? "Load Favorite" : "Load First Image", systemImage: "arrow.up")
+                                .font(.headline)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color(red: 0.89, green: 0.48, blue: 0.20))
                     }
-                    .buttonStyle(.plain)
-                    .disabled(service.isUpdatingFavorite)
+                }
+
+                if service.isLoadingImage {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                        .scaleEffect(1.5)
                 }
             }
-            .safeAreaPadding(.bottom, 18)
-        }
-        .onChange(of: service.currentAssetID) { _, _ in
-            viewerZoomScale = viewerMinimumZoomScale
+            .overlay(alignment: .bottom) {
+                VStack(spacing: 10) {
+                    if canSwipeToAdvance && feedDragOffset < -8 {
+                        Text(scope == .favorites ? "Release to load the next favorite image" : "Release to load the next random image")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(.black.opacity(0.52))
+                            )
+                    }
+
+                    if service.currentAssetID != nil {
+                        Button {
+                            service.toggleFavorite()
+                        } label: {
+                            Group {
+                                if service.isUpdatingFavorite {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: service.currentImageIsFavorite ? "star.fill" : "star")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundStyle(service.currentImageIsFavorite ? Color.yellow : .white)
+                                }
+                            }
+                            .frame(width: 42, height: 42)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(service.isUpdatingFavorite || isAnimatingFeedAdvance)
+                    }
+                }
+                .safeAreaPadding(.bottom, 18)
+            }
+            .onChange(of: service.currentAssetID) { _, _ in
+                viewerZoomScale = viewerMinimumZoomScale
+                let resetTransaction = Transaction(animation: nil)
+                withTransaction(resetTransaction) {
+                    feedDragOffset = 0
+                    isAnimatingFeedAdvance = false
+                }
+            }
         }
     }
 
-    private func feedSwipeGesture(for scope: ImageSelectionScope, enabled: Bool) -> some Gesture {
-        DragGesture(minimumDistance: 22)
-            .onChanged { value in
-                guard enabled else { return }
-                guard value.translation.height < 0 else { return }
-                feedDragOffset = max(value.translation.height, -160)
+    private func handleFeedSwipeEnded(
+        for scope: ImageSelectionScope,
+        translation: CGFloat,
+        verticalVelocity: CGFloat,
+        viewportHeight: CGFloat,
+        enabled: Bool
+    ) {
+        guard enabled else {
+            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.9, blendDuration: 0.08)) {
+                feedDragOffset = 0
             }
-            .onEnded { value in
-                guard enabled else {
-                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) {
-                        feedDragOffset = 0
-                    }
-                    return
-                }
+            return
+        }
 
-                let shouldLoadNext = value.translation.height < -110 || value.predictedEndTranslation.height < -200
+        let dragThreshold = min(max(viewportHeight * 0.028, 18), 28)
+        let projectedTranslation = translation + min(verticalVelocity * 0.12, 0)
+        let shouldLoadNext = projectedTranslation < -dragThreshold
 
-                guard shouldLoadNext else {
-                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) {
-                        feedDragOffset = 0
-                    }
-                    return
-                }
+        guard shouldLoadNext else {
+            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.9, blendDuration: 0.08)) {
+                feedDragOffset = 0
+            }
+            return
+        }
 
-                withAnimation(.easeOut(duration: 0.16)) {
-                    feedDragOffset = -140
-                }
+        advanceFeed(in: scope, viewportHeight: viewportHeight)
+    }
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                    service.requestNextImage(in: scope)
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
-                        feedDragOffset = 0
-                    }
+    private func advanceFeed(in scope: ImageSelectionScope, viewportHeight: CGFloat) {
+        guard !isAnimatingFeedAdvance else { return }
+
+        if service.nextImage != nil {
+            isAnimatingFeedAdvance = true
+            withAnimation(.timingCurve(0.22, 0.92, 0.28, 1, duration: 0.22)) {
+                feedDragOffset = -viewportHeight
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                service.requestNextImage(in: scope)
+                let resetTransaction = Transaction(animation: nil)
+                withTransaction(resetTransaction) {
+                    feedDragOffset = 0
+                    isAnimatingFeedAdvance = false
                 }
             }
+            return
+        }
+
+        withAnimation(.easeOut(duration: 0.12)) {
+            feedDragOffset = -min(max(viewportHeight * 0.04, 20), 44)
+        }
+
+        service.requestNextImage(in: scope)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            withAnimation(.interactiveSpring(response: 0.28, dampingFraction: 0.9, blendDuration: 0.08)) {
+                feedDragOffset = 0
+            }
+        }
     }
 
     private func viewerInfoChip(_ label: String, tint: Color) -> some View {
@@ -485,6 +544,9 @@ struct ViewerRootView: View {
 private struct ZoomableImageSurface: UIViewRepresentable {
     let image: UIImage
     let assetID: UUID
+    let isSwipeEnabled: Bool
+    let onSwipeChanged: (CGFloat) -> Void
+    let onSwipeEnded: (CGFloat, CGFloat) -> Void
     @Binding var zoomScale: CGFloat
     @Binding var minimumZoomScale: CGFloat
 
@@ -501,7 +563,11 @@ private struct ZoomableImageSurface: UIViewRepresentable {
 
     func updateUIView(_ uiView: ZoomableImageSurfaceView, context: Context) {
         context.coordinator.parent = self
+        uiView.isSwipeEnabled = isSwipeEnabled
+        uiView.onSwipeChanged = onSwipeChanged
+        uiView.onSwipeEnded = onSwipeEnded
         uiView.display(image: image, assetID: assetID)
+        uiView.updateInteractionMode()
         context.coordinator.publishZoomState(from: uiView.scrollView)
     }
 
@@ -519,6 +585,7 @@ private struct ZoomableImageSurface: UIViewRepresentable {
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             surfaceView?.centerImageIfNeeded()
+            surfaceView?.updateInteractionMode()
             publishZoomState(from: scrollView)
         }
 
@@ -543,12 +610,54 @@ private struct ZoomableImageSurface: UIViewRepresentable {
     }
 }
 
-private final class ZoomableImageSurfaceView: UIView {
+private struct StaticImageSurface: View {
+    let image: UIImage
+
+    var body: some View {
+        GeometryReader { proxy in
+            let fittedSize = fittedImageSize(for: image, in: proxy.size)
+
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: fittedSize.width, height: fittedSize.height)
+                .position(x: proxy.size.width * 0.5, y: proxy.size.height * 0.5)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func fittedImageSize(for image: UIImage, in viewportSize: CGSize) -> CGSize {
+        let imageWidth = max(image.size.width, 1)
+        let imageHeight = max(image.size.height, 1)
+        let widthScale = viewportSize.width / imageWidth
+        let heightScale = viewportSize.height / imageHeight
+        let scale = min(min(widthScale, heightScale), 1)
+
+        return CGSize(
+            width: imageWidth * scale,
+            height: imageHeight * scale
+        )
+    }
+}
+
+private final class ZoomableImageSurfaceView: UIView, UIGestureRecognizerDelegate {
     let scrollView = UIScrollView()
     let imageView = UIImageView()
 
+    var isSwipeEnabled = false
+    var onSwipeChanged: ((CGFloat) -> Void)?
+    var onSwipeEnded: ((CGFloat, CGFloat) -> Void)?
+
     private var currentAssetID: UUID?
     private var currentImageSize: CGSize = .zero
+    private lazy var swipePanGestureRecognizer: UIPanGestureRecognizer = {
+        let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handleSwipePan(_:)))
+        recognizer.delegate = self
+        recognizer.cancelsTouchesInView = true
+        recognizer.minimumNumberOfTouches = 1
+        recognizer.maximumNumberOfTouches = 1
+        return recognizer
+    }()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -563,6 +672,7 @@ private final class ZoomableImageSurfaceView: UIView {
         scrollView.bounces = true
         scrollView.alwaysBounceVertical = false
         scrollView.alwaysBounceHorizontal = false
+        scrollView.delaysContentTouches = false
         scrollView.clipsToBounds = false
 
         imageView.backgroundColor = .clear
@@ -571,6 +681,7 @@ private final class ZoomableImageSurfaceView: UIView {
 
         addSubview(scrollView)
         scrollView.addSubview(imageView)
+        scrollView.addGestureRecognizer(swipePanGestureRecognizer)
     }
 
     @available(*, unavailable)
@@ -601,6 +712,7 @@ private final class ZoomableImageSurfaceView: UIView {
         }
 
         updateZoomScales(resetZoom: isNewAsset)
+        updateInteractionMode()
     }
 
     func centerImageIfNeeded() {
@@ -640,6 +752,49 @@ private final class ZoomableImageSurfaceView: UIView {
         }
 
         centerImageIfNeeded()
+        updateInteractionMode()
+    }
+
+    func updateInteractionMode() {
+        let shouldOwnFeedSwipe = isSwipeEnabled && scrollView.zoomScale <= (scrollView.minimumZoomScale + 0.01)
+
+        if scrollView.panGestureRecognizer.isEnabled == shouldOwnFeedSwipe {
+            scrollView.panGestureRecognizer.isEnabled = !shouldOwnFeedSwipe
+        }
+
+        if swipePanGestureRecognizer.isEnabled != shouldOwnFeedSwipe {
+            swipePanGestureRecognizer.isEnabled = shouldOwnFeedSwipe
+        }
+    }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === swipePanGestureRecognizer else {
+            return true
+        }
+
+        let velocity = swipePanGestureRecognizer.velocity(in: scrollView)
+        return isSwipeEnabled && abs(velocity.y) > abs(velocity.x) && velocity.y < 0
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        gestureRecognizer === swipePanGestureRecognizer || otherGestureRecognizer === swipePanGestureRecognizer
+    }
+
+    @objc
+    private func handleSwipePan(_ recognizer: UIPanGestureRecognizer) {
+        guard isSwipeEnabled else { return }
+
+        let translationY = recognizer.translation(in: scrollView).y
+        let velocityY = recognizer.velocity(in: scrollView).y
+
+        switch recognizer.state {
+        case .changed:
+            onSwipeChanged?(translationY)
+        case .cancelled, .ended, .failed:
+            onSwipeEnded?(translationY, velocityY)
+        default:
+            break
+        }
     }
 }
 

@@ -38,6 +38,12 @@ private struct ViewerFrame {
 private typealias PendingTransfer = (descriptor: ResourceDescriptor, purpose: ImageRequestPurpose, scope: ImageSelectionScope)
 
 public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sendable {
+    private struct PrefetchPresentationSnapshot {
+        let nextFrame: ViewerFrame?
+        let queueCount: Int
+        let anyPrefetchInFlight: Bool
+    }
+
     @Published public private(set) var connectionStatus = "Searching for your Mac…"
     @Published public private(set) var hostName: String?
     @Published public private(set) var libraryCount = 0
@@ -46,6 +52,8 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     @Published public private(set) var currentImage: SnapletPlatformImage?
     @Published public private(set) var currentAssetID: UUID?
     @Published public private(set) var currentImageIsFavorite = false
+    @Published public private(set) var nextImage: SnapletPlatformImage?
+    @Published public private(set) var prefetchedImageCount = 0
     @Published public private(set) var isLoadingImage = false
     @Published public private(set) var isPrefetching = false
     @Published public private(set) var isUploadingImages = false
@@ -61,15 +69,17 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private var session: MCSession
     private var browser: MCNearbyServiceBrowser
     private let stateQueue = DispatchQueue(label: "snaplet.viewer.state")
-    private let workQueue = DispatchQueue(label: "snaplet.viewer.service", qos: .userInitiated, attributes: .concurrent)
+    private let workQueue = DispatchQueue(label: "snaplet.viewer.service", qos: .userInteractive, attributes: .concurrent)
     private let debugAutoUploadPayloads: [ImageUploadPayload]
+    private let prefetchTargetDepth = 5
+    private let maxConcurrentPrefetchRequests = 3
     private var invitedPeerIDs: Set<String> = []
     private var pendingResources: [String: PendingTransfer] = [:]
     private var receivedResources: [String: URL] = [:]
-    private var prefetchedFrame: ViewerFrame?
+    private var prefetchedFrames: [ViewerFrame] = []
     private var outstandingUploadCount = 0
     private var displayRequestInFlight = false
-    private var prefetchRequestInFlight = false
+    private var prefetchRequestsInFlight: [ImageSelectionScope: Int] = [:]
     private var hasScheduledDebugAutoUpload = false
     private var isStarted = false
     private var currentSessionState: MCSessionState = .notConnected
@@ -133,7 +143,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
         if let prefetchedFrame = takePrefetchedFrame(matching: targetScope) {
             promotePrefetchedFrame(prefetchedFrame)
-            requestPrefetchIfPossible(for: targetScope)
+            maintainPrefetchPipeline(for: targetScope)
             return
         }
 
@@ -144,16 +154,19 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         let previousScope = currentSelectionScope()
         let canReuseCurrentImage = scope == .all || currentImageIsFavorite
         let hadCurrentImage = currentImage != nil
-        let removedPrefetchedURL = discardPrefetchedFrameIfScopeDiffers(from: scope)
+        let removedPrefetchedURLs = discardPrefetchedFramesIfScopeDiffers(from: scope)
         let removedCurrentURL = hadCurrentImage && !canReuseCurrentImage ? currentImageURL : nil
 
         setCurrentSelectionScope(scope)
-        resetRequestFlags()
+        resetDisplayRequestFlag()
+        publishPrefetchState()
 
         updatePublishedState {
             $0.activeSelectionScope = scope
             $0.errorMessage = nil
             $0.isUpdatingFavorite = false
+            $0.nextImage = nil
+            $0.prefetchedImageCount = 0
 
             if hadCurrentImage && !canReuseCurrentImage {
                 $0.currentImage = nil
@@ -165,7 +178,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             }
         }
 
-        if let removedPrefetchedURL {
+        for removedPrefetchedURL in removedPrefetchedURLs {
             try? FileManager.default.removeItem(at: removedPrefetchedURL)
         }
         if let removedCurrentURL {
@@ -179,7 +192,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         if shouldLoadImmediately {
             requestNextImage(in: scope)
         } else {
-            requestPrefetchIfPossible(for: scope)
+            maintainPrefetchPipeline(for: scope)
         }
     }
 
@@ -253,7 +266,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
     private func requestImage(purpose: ImageRequestPurpose, scope: ImageSelectionScope) {
         guard !session.connectedPeers.isEmpty else { return }
-        guard reserveRequestSlot(for: purpose) else { return }
+        guard reserveRequestSlot(for: purpose, scope: scope) else { return }
 
         do {
             try session.send(
@@ -274,26 +287,31 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 }
             }
         } catch {
-            clearRequestFlag(for: purpose)
+            clearRequestFlag(for: purpose, scope: scope)
             updatePublishedState {
                 $0.errorMessage = error.localizedDescription
                 $0.connectionStatus = "Request failed"
                 $0.isLoadingImage = false
-                $0.isPrefetching = false
             }
+            publishPrefetchState()
         }
     }
 
-    private func requestPrefetchIfPossible(for scope: ImageSelectionScope? = nil) {
+    private func maintainPrefetchPipeline(for scope: ImageSelectionScope? = nil) {
         let targetScope = scope ?? currentSelectionScope()
         guard !session.connectedPeers.isEmpty else { return }
-        guard !hasPrefetchedFrame(for: targetScope) else { return }
-        requestImage(purpose: .prefetch, scope: targetScope)
+        let requestBatchSize = nextPrefetchRequestBatchSize(for: targetScope)
+        guard requestBatchSize > 0 else { return }
+
+        for _ in 0..<requestBatchSize {
+            requestImage(purpose: .prefetch, scope: targetScope)
+        }
     }
 
     private func promotePrefetchedFrame(_ frame: ViewerFrame) {
         let previousImageURL = currentImageURL
         let hostName = self.hostName
+        let prefetchSnapshot = prefetchPresentationSnapshot()
 
         updatePublishedState {
             $0.currentImage = frame.image
@@ -301,8 +319,11 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             $0.currentFilename = frame.filename
             $0.currentAssetID = frame.assetID
             $0.currentImageIsFavorite = frame.isFavorite
+            $0.nextImage = prefetchSnapshot.nextFrame?.image
+            $0.prefetchedImageCount = prefetchSnapshot.queueCount
             $0.isLoadingImage = false
             $0.errorMessage = nil
+            $0.isPrefetching = prefetchSnapshot.anyPrefetchInFlight
             $0.connectionStatus = hostName.map { "Connected to \($0)" } ?? "Connected"
         }
 
@@ -433,14 +454,15 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             guard let assetID = message.assetID, let favoriteValue = message.favoriteValue else { return }
             handleFavoriteStatusUpdate(assetID: assetID, isFavorite: favoriteValue)
         case .failure:
-            resetRequestFlags()
+            resetDisplayRequestFlag()
+            clearAllPrefetchRequestFlags()
             updatePublishedState {
                 $0.isLoadingImage = false
-                $0.isPrefetching = false
                 $0.isUpdatingFavorite = false
                 $0.errorMessage = message.errorMessage
                 $0.connectionStatus = "Request failed"
             }
+            publishPrefetchState()
         case .requestRandomImage, .setFavorite:
             break
         }
@@ -451,10 +473,10 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             clearRequestFlagsForResource(named: resourceName)
             updatePublishedState {
                 $0.isLoadingImage = false
-                $0.isPrefetching = false
                 $0.errorMessage = error.localizedDescription
                 $0.connectionStatus = "Transfer failed"
             }
+            publishPrefetchState()
             return
         }
 
@@ -462,10 +484,10 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             clearRequestFlagsForResource(named: resourceName)
             updatePublishedState {
                 $0.isLoadingImage = false
-                $0.isPrefetching = false
                 $0.errorMessage = "The host finished a transfer without a file URL."
                 $0.connectionStatus = "Transfer failed"
             }
+            publishPrefetchState()
             return
         }
 
@@ -483,10 +505,10 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             clearRequestFlagsForResource(named: resourceName)
             updatePublishedState {
                 $0.isLoadingImage = false
-                $0.isPrefetching = false
                 $0.errorMessage = error.localizedDescription
                 $0.connectionStatus = "Transfer failed"
             }
+            publishPrefetchState()
         }
     }
 
@@ -495,13 +517,13 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             guard let self else { return }
 
             guard let decodedImage = self.decodeImage(at: fileURL) else {
-                self.clearRequestFlag(for: pendingTransfer.purpose)
+                self.clearRequestFlag(for: pendingTransfer.purpose, scope: pendingTransfer.scope)
                 self.updatePublishedState {
                     $0.isLoadingImage = false
-                    $0.isPrefetching = false
                     $0.errorMessage = "Failed to decode \(pendingTransfer.descriptor.originalFilename)."
                     $0.connectionStatus = "Decode failed"
                 }
+                self.publishPrefetchState()
                 return
             }
 
@@ -516,12 +538,8 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
             let activeScope = self.currentSelectionScope()
             guard frame.scope == activeScope else {
-                self.clearRequestFlag(for: pendingTransfer.purpose)
-                if pendingTransfer.purpose == .prefetch {
-                    self.updatePublishedState {
-                        $0.isPrefetching = false
-                    }
-                }
+                self.clearRequestFlag(for: pendingTransfer.purpose, scope: pendingTransfer.scope)
+                self.publishPrefetchState()
                 try? FileManager.default.removeItem(at: fileURL)
                 return
             }
@@ -529,7 +547,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             switch pendingTransfer.purpose {
             case .displayNow:
                 self.promoteDecodedFrame(frame)
-                self.requestPrefetchIfPossible(for: frame.scope)
+                self.maintainPrefetchPipeline(for: frame.scope)
             case .prefetch:
                 self.storePrefetchedFrame(frame)
             }
@@ -539,7 +557,8 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private func promoteDecodedFrame(_ frame: ViewerFrame) {
         let previousImageURL = currentImageURL
         let hostName = self.hostName
-        clearRequestFlag(for: .displayNow)
+        clearRequestFlag(for: .displayNow, scope: frame.scope)
+        let prefetchSnapshot = prefetchPresentationSnapshot()
 
         updatePublishedState {
             $0.currentImage = frame.image
@@ -547,7 +566,10 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             $0.currentFilename = frame.filename
             $0.currentAssetID = frame.assetID
             $0.currentImageIsFavorite = frame.isFavorite
+            $0.nextImage = prefetchSnapshot.nextFrame?.image
+            $0.prefetchedImageCount = prefetchSnapshot.queueCount
             $0.isLoadingImage = false
+            $0.isPrefetching = prefetchSnapshot.anyPrefetchInFlight
             $0.errorMessage = nil
             $0.connectionStatus = hostName.map { "Connected to \($0)" } ?? "Connected"
         }
@@ -558,18 +580,23 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     }
 
     private func storePrefetchedFrame(_ frame: ViewerFrame) {
-        let previousPrefetchedURL = storePrefetchedFrameInState(frame)
+        let removedPrefetchedURLs = storePrefetchedFrameInState(frame)
+        let prefetchSnapshot = prefetchPresentationSnapshot()
 
         updatePublishedState {
-            $0.isPrefetching = false
+            $0.nextImage = prefetchSnapshot.nextFrame?.image
+            $0.prefetchedImageCount = prefetchSnapshot.queueCount
+            $0.isPrefetching = prefetchSnapshot.anyPrefetchInFlight
             if !$0.isLoadingImage {
                 $0.connectionStatus = $0.hostName.map { "Connected to \($0)" } ?? "Connected"
             }
         }
 
-        if let previousPrefetchedURL, previousPrefetchedURL != frame.fileURL {
+        for previousPrefetchedURL in removedPrefetchedURLs where previousPrefetchedURL != frame.fileURL {
             try? FileManager.default.removeItem(at: previousPrefetchedURL)
         }
+
+        maintainPrefetchPipeline(for: frame.scope)
     }
 
     private func updatePublishedState(_ update: @Sendable @escaping (PeerViewerService) -> Void) {
@@ -579,7 +606,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
-    private func reserveRequestSlot(for purpose: ImageRequestPurpose) -> Bool {
+    private func reserveRequestSlot(for purpose: ImageRequestPurpose, scope: ImageSelectionScope) -> Bool {
         stateQueue.sync {
             switch purpose {
             case .displayNow:
@@ -587,28 +614,36 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 displayRequestInFlight = true
                 return true
             case .prefetch:
-                guard !prefetchRequestInFlight, prefetchedFrame == nil else { return false }
-                prefetchRequestInFlight = true
+                let queuedPrefetches = prefetchedFrames.filter { $0.scope == scope }.count
+                let inFlightPrefetches = prefetchRequestsInFlight[scope, default: 0]
+                guard queuedPrefetches + inFlightPrefetches < prefetchTargetDepth else { return false }
+                guard inFlightPrefetches < maxConcurrentPrefetchRequests else { return false }
+                prefetchRequestsInFlight[scope, default: 0] = inFlightPrefetches + 1
                 return true
             }
         }
     }
 
-    private func clearRequestFlag(for purpose: ImageRequestPurpose) {
+    private func clearRequestFlag(for purpose: ImageRequestPurpose, scope: ImageSelectionScope) {
         stateQueue.sync {
             switch purpose {
             case .displayNow:
                 displayRequestInFlight = false
             case .prefetch:
-                prefetchRequestInFlight = false
+                prefetchRequestsInFlight[scope] = max(0, prefetchRequestsInFlight[scope, default: 0] - 1)
             }
         }
     }
 
-    private func resetRequestFlags() {
+    private func resetDisplayRequestFlag() {
         stateQueue.sync {
             displayRequestInFlight = false
-            prefetchRequestInFlight = false
+        }
+    }
+
+    private func clearAllPrefetchRequestFlags() {
+        stateQueue.sync {
+            prefetchRequestsInFlight.removeAll()
         }
     }
 
@@ -645,7 +680,10 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 case .displayNow:
                     displayRequestInFlight = false
                 case .prefetch:
-                    prefetchRequestInFlight = false
+                    prefetchRequestsInFlight[pendingTransfer.scope] = max(
+                        0,
+                        prefetchRequestsInFlight[pendingTransfer.scope, default: 0] - 1
+                    )
                 }
             }
 
@@ -657,27 +695,46 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
     private func takePrefetchedFrame(matching scope: ImageSelectionScope) -> ViewerFrame? {
         stateQueue.sync {
-            guard prefetchedFrame?.scope == scope else {
+            guard let matchingIndex = prefetchedFrames.firstIndex(where: { $0.scope == scope }) else {
                 return nil
             }
-            let frame = prefetchedFrame
-            prefetchedFrame = nil
-            return frame
+            return prefetchedFrames.remove(at: matchingIndex)
         }
     }
 
-    private func hasPrefetchedFrame(for scope: ImageSelectionScope) -> Bool {
+    private func prefetchPipelineDeficit(for scope: ImageSelectionScope) -> Int {
         stateQueue.sync {
-            prefetchedFrame?.scope == scope
+            let queuedCount = prefetchedFrames.filter { $0.scope == scope }.count
+            let inFlightCount = prefetchRequestsInFlight[scope, default: 0]
+            return max(prefetchTargetDepth - (queuedCount + inFlightCount), 0)
         }
     }
 
-    private func storePrefetchedFrameInState(_ frame: ViewerFrame) -> URL? {
+    private func nextPrefetchRequestBatchSize(for scope: ImageSelectionScope) -> Int {
         stateQueue.sync {
-            let previousURL = prefetchedFrame?.fileURL
-            prefetchedFrame = frame
-            prefetchRequestInFlight = false
-            return previousURL
+            let queuedCount = prefetchedFrames.filter { $0.scope == scope }.count
+            let inFlightCount = prefetchRequestsInFlight[scope, default: 0]
+            let deficit = max(prefetchTargetDepth - (queuedCount + inFlightCount), 0)
+            let availableConcurrency = max(maxConcurrentPrefetchRequests - inFlightCount, 0)
+            return min(deficit, availableConcurrency)
+        }
+    }
+
+    private func storePrefetchedFrameInState(_ frame: ViewerFrame) -> [URL] {
+        stateQueue.sync {
+            prefetchRequestsInFlight[frame.scope] = max(0, prefetchRequestsInFlight[frame.scope, default: 0] - 1)
+
+            prefetchedFrames.append(frame)
+
+            var removedURLs: [URL] = []
+            while prefetchedFrames.filter({ $0.scope == frame.scope }).count > prefetchTargetDepth {
+                guard let removalIndex = prefetchedFrames.indices.last(where: { prefetchedFrames[$0].scope == frame.scope }) else {
+                    break
+                }
+                removedURLs.append(prefetchedFrames.remove(at: removalIndex).fileURL)
+            }
+
+            return removedURLs
         }
     }
 
@@ -773,42 +830,52 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
-    private func discardPrefetchedFrameIfScopeDiffers(from scope: ImageSelectionScope) -> URL? {
+    private func discardPrefetchedFramesIfScopeDiffers(from scope: ImageSelectionScope) -> [URL] {
         stateQueue.sync {
-            guard let prefetchedFrame, prefetchedFrame.scope != scope else {
-                return nil
+            guard prefetchedFrames.contains(where: { $0.scope != scope }) else {
+                return []
             }
-            self.prefetchedFrame = nil
-            return prefetchedFrame.fileURL
+
+            let removedURLs = prefetchedFrames
+                .filter { $0.scope != scope }
+                .map(\.fileURL)
+            prefetchedFrames.removeAll { $0.scope != scope }
+            return removedURLs
         }
     }
 
-    private func reconcilePrefetchedFavoriteState(assetID: UUID, isFavorite: Bool) -> URL? {
+    private func reconcilePrefetchedFavoriteState(assetID: UUID, isFavorite: Bool) -> [URL] {
         stateQueue.sync {
-            guard let prefetchedFrame, prefetchedFrame.assetID == assetID else {
-                return nil
+            var removedURLs: [URL] = []
+
+            prefetchedFrames.removeAll { frame in
+                guard frame.assetID == assetID else { return false }
+                if frame.scope == .favorites && !isFavorite {
+                    removedURLs.append(frame.fileURL)
+                    return true
+                }
+                return false
             }
 
-            if prefetchedFrame.scope == .favorites && !isFavorite {
-                self.prefetchedFrame = nil
-                return prefetchedFrame.fileURL
+            prefetchedFrames = prefetchedFrames.map { frame in
+                guard frame.assetID == assetID else { return frame }
+                return ViewerFrame(
+                    assetID: frame.assetID,
+                    image: frame.image,
+                    fileURL: frame.fileURL,
+                    filename: frame.filename,
+                    isFavorite: isFavorite,
+                    scope: frame.scope
+                )
             }
 
-            self.prefetchedFrame = ViewerFrame(
-                assetID: prefetchedFrame.assetID,
-                image: prefetchedFrame.image,
-                fileURL: prefetchedFrame.fileURL,
-                filename: prefetchedFrame.filename,
-                isFavorite: isFavorite,
-                scope: prefetchedFrame.scope
-            )
-            return nil
+            return removedURLs
         }
     }
 
     private func handleFavoriteStatusUpdate(assetID: UUID, isFavorite: Bool) {
         let activeScope = currentSelectionScope()
-        let removedPrefetchedURL = reconcilePrefetchedFavoriteState(assetID: assetID, isFavorite: isFavorite)
+        let removedPrefetchedURLs = reconcilePrefetchedFavoriteState(assetID: assetID, isFavorite: isFavorite)
         let shouldAdvanceFavorites = currentAssetID == assetID && activeScope == .favorites && !isFavorite
         let removedCurrentURL = shouldAdvanceFavorites ? currentImageURL : nil
 
@@ -829,17 +896,18 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             }
         }
 
-        if let removedPrefetchedURL {
+        for removedPrefetchedURL in removedPrefetchedURLs {
             try? FileManager.default.removeItem(at: removedPrefetchedURL)
         }
         if let removedCurrentURL {
             try? FileManager.default.removeItem(at: removedCurrentURL)
         }
 
+        publishPrefetchState()
         if shouldAdvanceFavorites {
             requestNextImage(in: .favorites)
-        } else if activeScope == .favorites && removedPrefetchedURL != nil {
-            requestPrefetchIfPossible(for: .favorites)
+        } else if activeScope == .favorites && !removedPrefetchedURLs.isEmpty {
+            maintainPrefetchPipeline(for: .favorites)
         }
     }
 
@@ -866,18 +934,39 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
+    private func prefetchPresentationSnapshot() -> PrefetchPresentationSnapshot {
+        stateQueue.sync {
+            let activeScope = activeSelectionScopeState
+            let activeFrames = prefetchedFrames.filter { $0.scope == activeScope }
+            return PrefetchPresentationSnapshot(
+                nextFrame: activeFrames.first,
+                queueCount: activeFrames.count,
+                anyPrefetchInFlight: prefetchRequestsInFlight.values.contains(where: { $0 > 0 })
+            )
+        }
+    }
+
+    private func publishPrefetchState() {
+        let snapshot = prefetchPresentationSnapshot()
+        updatePublishedState {
+            $0.nextImage = snapshot.nextFrame?.image
+            $0.prefetchedImageCount = snapshot.queueCount
+            $0.isPrefetching = snapshot.anyPrefetchInFlight
+        }
+    }
+
     private func resetTransientState() {
         stateQueue.sync {
             invitedPeerIDs.removeAll()
             pendingResources.removeAll()
             displayRequestInFlight = false
-            prefetchRequestInFlight = false
+            prefetchRequestsInFlight.removeAll()
             outstandingUploadCount = 0
 
-            if let prefetchedFrame {
+            for prefetchedFrame in prefetchedFrames {
                 try? FileManager.default.removeItem(at: prefetchedFrame.fileURL)
             }
-            prefetchedFrame = nil
+            prefetchedFrames.removeAll()
 
             for receivedURL in receivedResources.values {
                 try? FileManager.default.removeItem(at: receivedURL)
@@ -1053,6 +1142,8 @@ extension PeerViewerService: MCSessionDelegate {
                 $0.isLoadingImage = false
                 $0.isPrefetching = false
                 $0.isUpdatingFavorite = false
+                $0.nextImage = nil
+                $0.prefetchedImageCount = 0
                 $0.connectionStatus = "Searching for your Mac…"
             case .connecting:
                 self.stopBrowsing()
@@ -1077,7 +1168,7 @@ extension PeerViewerService: MCSessionDelegate {
             } else if currentImage == nil {
                 requestImage(purpose: .displayNow, scope: currentSelectionScope())
             } else {
-                requestPrefetchIfPossible(for: currentSelectionScope())
+                maintainPrefetchPipeline(for: currentSelectionScope())
             }
         }
     }

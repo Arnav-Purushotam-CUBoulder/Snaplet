@@ -6,6 +6,13 @@ import UIKit
 #endif
 
 public final class PeerHostService: NSObject, ObservableObject, @unchecked Sendable {
+    private struct PreparedTransfer {
+        let asset: ImageAsset
+        let scope: ImageSelectionScope
+        let resourceName: String
+        let stagedURL: URL
+    }
+
     @Published public private(set) var isAdvertising = false
     @Published public private(set) var connectionStatus = "Idle"
     @Published public private(set) var connectedPeerNames: [String] = []
@@ -16,7 +23,14 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
     private let peerID: MCPeerID
     private let session: MCSession
     private let advertiser: MCNearbyServiceAdvertiser
+    private let transferStagingDirectory: URL
+    private let stateQueue = DispatchQueue(label: "snaplet.host.service.state")
     private let workQueue = DispatchQueue(label: "snaplet.host.service", qos: .userInitiated, attributes: .concurrent)
+    private let preparedTransferTargetCount = 5
+    private let maxConcurrentPreparedTransfers = 3
+    private var preparedTransfers: [ImageSelectionScope: [PreparedTransfer]] = [:]
+    private var preparingTransferCount: [ImageSelectionScope: Int] = [:]
+    private var preparedTransferGeneration: [ImageSelectionScope: Int] = [:]
 
     public var onLibraryMutated: (@Sendable () -> Void)?
 
@@ -29,15 +43,20 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
             discoveryInfo: nil,
             serviceType: SnapletPeerConfiguration.serviceType
         )
+        self.transferStagingDirectory = FileManager.default.temporaryDirectory
+            .appending(path: "snaplet-host-staging", directoryHint: .isDirectory)
 
         super.init()
 
+        try? FileManager.default.createDirectory(at: transferStagingDirectory, withIntermediateDirectories: true)
         session.delegate = self
         advertiser.delegate = self
     }
 
     public func start() {
         advertiser.startAdvertisingPeer()
+        ensurePreparedTransfers(for: .all)
+        ensurePreparedTransfers(for: .favorites)
         updatePublishedState {
             $0.isAdvertising = true
             $0.connectionStatus = "Advertising as \($0.peerID.displayName)"
@@ -48,6 +67,8 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
     public func stop() {
         advertiser.stopAdvertisingPeer()
         session.disconnect()
+        invalidatePreparedTransfers(for: .all)
+        invalidatePreparedTransfers(for: .favorites)
         updatePublishedState {
             $0.isAdvertising = false
             $0.connectedPeerNames = []
@@ -66,7 +87,9 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
             try sendMessage(.libraryStatus(count: imageCount), to: [peerID])
 
             let favoritesOnly = scope == .favorites
-            guard let asset = try imageLibraryStore.randomAsset(favoritesOnly: favoritesOnly) else {
+            let preparedTransfer = try takePreparedTransfer(for: scope) ?? prepareTransfer(for: scope)
+
+            guard let preparedTransfer else {
                 let failureMessage = favoritesOnly
                     ? "No favorite images are marked yet."
                     : "No images have been imported yet."
@@ -78,20 +101,24 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
                 return
             }
 
-            let resourceName = asset.storedFilename
             let descriptor = ResourceDescriptor(
-                assetID: asset.id,
-                resourceName: resourceName,
-                originalFilename: asset.originalFilename,
-                byteSize: asset.byteSize,
-                isFavorite: asset.isFavorite
+                assetID: preparedTransfer.asset.id,
+                resourceName: preparedTransfer.resourceName,
+                originalFilename: preparedTransfer.asset.originalFilename,
+                byteSize: preparedTransfer.asset.byteSize,
+                isFavorite: preparedTransfer.asset.isFavorite
             )
 
             try sendMessage(.transferReady(descriptor, purpose: purpose, scope: scope), to: [peerID])
+            ensurePreparedTransfers(for: scope)
 
-            let fileURL = asset.fileURL(relativeTo: imageLibraryStore.rootDirectory)
-            session.sendResource(at: fileURL, withName: resourceName, toPeer: peerID) { [weak self] error in
+            session.sendResource(
+                at: preparedTransfer.stagedURL,
+                withName: preparedTransfer.resourceName,
+                toPeer: peerID
+            ) { [weak self] error in
                 guard let self else { return }
+                try? FileManager.default.removeItem(at: preparedTransfer.stagedURL)
 
                 if let error {
                     self.updatePublishedState {
@@ -102,7 +129,7 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
                 } else {
                     self.updatePublishedState {
                         let scopeDescription = favoritesOnly ? "favorite" : "random"
-                        $0.appendLog("Sent \(scopeDescription) image \(asset.originalFilename) to \(peerID.displayName).")
+                        $0.appendLog("Sent \(scopeDescription) image \(preparedTransfer.asset.originalFilename) to \(peerID.displayName).")
                     }
                 }
             }
@@ -163,6 +190,8 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
 
             try sendMessage(.uploadComplete(descriptor, count: libraryCount), to: [peerID])
             try sendLibraryStatus(to: session.connectedPeers)
+            invalidatePreparedTransfers(for: .all)
+            ensurePreparedTransfers(for: .all)
 
             updatePublishedState {
                 $0.appendLog("Imported \(resourceName) from \(peerName).")
@@ -188,6 +217,8 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
             }
 
             try sendMessage(.favoriteStatusUpdated(assetID: updatedAsset.id, isFavorite: updatedAsset.isFavorite), to: [peerID])
+            invalidatePreparedTransfers(for: .favorites)
+            ensurePreparedTransfers(for: .favorites)
             updatePublishedState {
                 let favoriteState = updatedAsset.isFavorite ? "favorite" : "not favorite"
                 $0.appendLog("Marked \(updatedAsset.originalFilename) as \(favoriteState) for \(peerID.displayName).")
@@ -209,6 +240,111 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
         }
     }
 
+    private func takePreparedTransfer(for scope: ImageSelectionScope) throws -> PreparedTransfer? {
+        stateQueue.sync {
+            guard let firstPreparedTransfer = preparedTransfers[scope]?.first else {
+                return nil
+            }
+            preparedTransfers[scope]?.removeFirst()
+            return firstPreparedTransfer
+        }
+    }
+
+    private func prepareTransfer(for scope: ImageSelectionScope) throws -> PreparedTransfer? {
+        let favoritesOnly = scope == .favorites
+        guard let asset = try imageLibraryStore.randomAsset(favoritesOnly: favoritesOnly) else {
+            return nil
+        }
+
+        let stagedURL = transferStagingDirectory.appending(
+            path: "\(UUID().uuidString)-\(asset.storedFilename)"
+        )
+        if FileManager.default.fileExists(atPath: stagedURL.path) {
+            try FileManager.default.removeItem(at: stagedURL)
+        }
+        try FileManager.default.copyItem(
+            at: asset.fileURL(relativeTo: imageLibraryStore.rootDirectory),
+            to: stagedURL
+        )
+
+        return PreparedTransfer(
+            asset: asset,
+            scope: scope,
+            resourceName: "\(UUID().uuidString)-\(asset.storedFilename)",
+            stagedURL: stagedURL
+        )
+    }
+
+    private func ensurePreparedTransfers(for scope: ImageSelectionScope) {
+        let reservation = stateQueue.sync { () -> (generation: Int, taskCount: Int) in
+            let generation = preparedTransferGeneration[scope, default: 0]
+            let readyCount = preparedTransfers[scope, default: []].count
+            let preparingCount = preparingTransferCount[scope, default: 0]
+            let missingCount = max(preparedTransferTargetCount - (readyCount + preparingCount), 0)
+            let availableConcurrency = max(maxConcurrentPreparedTransfers - preparingCount, 0)
+            let taskCount = min(missingCount, availableConcurrency)
+            if taskCount > 0 {
+                preparingTransferCount[scope, default: 0] = preparingCount + taskCount
+            }
+            return (generation, taskCount)
+        }
+
+        guard reservation.taskCount > 0 else { return }
+
+        for _ in 0..<reservation.taskCount {
+            workQueue.async { [weak self] in
+                self?.prepareTransferAsync(for: scope, generation: reservation.generation)
+            }
+        }
+    }
+
+    private func prepareTransferAsync(for scope: ImageSelectionScope, generation: Int) {
+        let preparedTransfer: PreparedTransfer?
+
+        do {
+            preparedTransfer = try prepareTransfer(for: scope)
+        } catch {
+            updatePublishedState {
+                $0.lastError = error.localizedDescription
+                $0.appendLog("Failed to warm a \(scope.rawValue) image transfer: \(error.localizedDescription)")
+            }
+            preparedTransfer = nil
+        }
+
+        let staleURL: URL? = stateQueue.sync {
+            preparingTransferCount[scope] = max(0, preparingTransferCount[scope, default: 0] - 1)
+
+            guard let preparedTransfer else {
+                return nil
+            }
+            guard preparedTransferGeneration[scope, default: 0] == generation else {
+                return preparedTransfer.stagedURL
+            }
+
+            preparedTransfers[scope, default: []].append(preparedTransfer)
+            return nil
+        }
+
+        if let staleURL {
+            try? FileManager.default.removeItem(at: staleURL)
+            return
+        }
+    }
+
+    private func invalidatePreparedTransfers(for scope: ImageSelectionScope) {
+        let staleURLs = stateQueue.sync {
+            preparedTransferGeneration[scope, default: 0] += 1
+            preparingTransferCount[scope] = 0
+            let urls = preparedTransfers[scope, default: []].map(\.stagedURL)
+            preparedTransfers[scope] = []
+            return urls
+        }
+
+        for staleURL in staleURLs {
+            try? FileManager.default.removeItem(at: staleURL)
+        }
+    }
+
     private func appendLog(_ message: String) {
         let timestamp = DateFormatter.hostActivityFormatter.string(from: Date())
         activityLog.insert("[\(timestamp)] \(message)", at: 0)
@@ -219,7 +355,7 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
 
     private static func defaultDisplayName() -> String {
         #if os(iOS)
-        UIDevice.current.name
+        "Snaplet Host"
         #else
         Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         #endif
@@ -242,7 +378,7 @@ extension PeerHostService: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
-        if session.connectedPeers.contains(peerID) || !session.connectedPeers.isEmpty {
+        if session.connectedPeers.contains(peerID) {
             invitationHandler(false, nil)
             updatePublishedState {
                 $0.appendLog("Rejected duplicate invitation from \(peerID.displayName).")
@@ -285,6 +421,8 @@ extension PeerHostService: MCSessionDelegate {
 
                 do {
                     try self.sendLibraryStatus(to: [peerID])
+                    self.ensurePreparedTransfers(for: .all)
+                    self.ensurePreparedTransfers(for: .favorites)
                 } catch {
                     self.updatePublishedState {
                         $0.lastError = error.localizedDescription
