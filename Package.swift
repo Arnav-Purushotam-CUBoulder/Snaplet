@@ -20,7 +20,8 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SnapletCore"
+            name: "SnapletCore",
+            exclude: ["Assets.xcassets"]
         ),
         .executableTarget(
             name: "SnapletSmokeTests",

@@ -17,6 +17,7 @@ targets:
         INFOPLIST_FILE: Apps/HostMac/Info.plist
         SWIFT_VERSION: 6.0
         CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_STRICT_CONCURRENCY: complete
   SnapletViewer:
     type: application
@@ -33,5 +34,7 @@ targets:
         INFOPLIST_FILE: Apps/iOSViewer/Info.plist
         SWIFT_VERSION: 6.0
         CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        DEVELOPMENT_TEAM: 6NSBP8HC67
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_STRICT_CONCURRENCY: complete

@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		069E81C3FFA1AB99B22A92CD /* AppSupportPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */; };
 		06AF98F909CA8B3C2B19240E /* ImageLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541336B8F581C95ABE1A39C4 /* ImageLibraryStore.swift */; };
+		1E544DCE2B8412112EE84EBC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EE3B01A7E21050FD9C541BA5 /* Assets.xcassets */; };
 		2B7689D513A64735CCE0D120 /* PeerViewerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */; };
 		517722A9BE82029B6DB06939 /* HostDashboardModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40525894DE0DA7A34FBF506C /* HostDashboardModel.swift */; };
 		55B02C67138AF4A86FB6FB82 /* LibraryStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40475952308A094782AF1BC0 /* LibraryStatus.swift */; };
@@ -25,6 +26,7 @@
 		DF4A4C57B8968A2D41B6EFDE /* PeerViewerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */; };
 		E5EB233B5919A095818F0CEC /* PeerMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1A85AAEFBC6715BD1C241E /* PeerMessage.swift */; };
 		EE1B1134873B66135B4DB0DE /* PeerHostService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A261C8408E872FDDC288F7 /* PeerHostService.swift */; };
+		F3288CF2B51ABF4DDF4C9610 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EE3B01A7E21050FD9C541BA5 /* Assets.xcassets */; };
 		F9142E32559B1D673FFE2604 /* ViewerRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE1862CBB5E70C4A984F319B /* ViewerRootView.swift */; };
 /* End PBXBuildFile section */
 
@@ -41,6 +43,7 @@
 		8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSupportPaths.swift; sourceTree = "<group>"; };
 		DE1862CBB5E70C4A984F319B /* ViewerRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerRootView.swift; sourceTree = "<group>"; };
 		E59C7CA4305228848112DAB2 /* SnapletHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SnapletHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		EE3B01A7E21050FD9C541BA5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F9A261C8408E872FDDC288F7 /* PeerHostService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerHostService.swift; sourceTree = "<group>"; };
 		FC1A85AAEFBC6715BD1C241E /* PeerMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerMessage.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -49,6 +52,7 @@
 		0D1607FC8F59A936FC9D2571 /* SnapletCore */ = {
 			isa = PBXGroup;
 			children = (
+				EE3B01A7E21050FD9C541BA5 /* Assets.xcassets */,
 				F37FC29F0059913BF5F2017D /* Models */,
 				A7F30C3EB37319EEB2AA677E /* Persistence */,
 				26F5D4A16886F22637F48FE6 /* Support */,
@@ -154,6 +158,7 @@
 			buildConfigurationList = A8546101587903527FC68131 /* Build configuration list for PBXNativeTarget "SnapletViewer" */;
 			buildPhases = (
 				1D41EEFD4FC8AE8582B3B355 /* Sources */,
+				13295FA7C4DD3C3C8C454920 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -171,6 +176,7 @@
 			buildConfigurationList = 96ADFD898DF9C76961465A60 /* Build configuration list for PBXNativeTarget "SnapletHost" */;
 			buildPhases = (
 				6815B6C25A87FA48A97E90C8 /* Sources */,
+				C7822EB8372207E57F470D81 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -193,6 +199,7 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					64D3A11CC35B379D77AF5A62 = {
+						DevelopmentTeam = 6NSBP8HC67;
 						ProvisioningStyle = Automatic;
 					};
 					7098AB5C1484CF0E153D8EDA = {
@@ -219,6 +226,25 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		13295FA7C4DD3C3C8C454920 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F3288CF2B51ABF4DDF4C9610 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C7822EB8372207E57F470D81 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1E544DCE2B8412112EE84EBC /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		1D41EEFD4FC8AE8582B3B355 /* Sources */ = {
@@ -282,6 +308,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6NSBP8HC67;
 				INFOPLIST_FILE = Apps/iOSViewer/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -382,6 +409,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6NSBP8HC67;
 				INFOPLIST_FILE = Apps/iOSViewer/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (

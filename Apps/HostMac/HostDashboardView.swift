@@ -68,13 +68,22 @@ struct HostDashboardView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Snaplet Host")
-                .font(.system(size: 38, weight: .bold, design: .rounded))
+        HStack(alignment: .center, spacing: 18) {
+            Image("SnapletMark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 76, height: 76)
+                .padding(14)
+                .background(cardBackground(tint: .white.opacity(0.42)))
 
-            Text("Mac-native dashboard + image server for the iPhone random viewer.")
-                .font(.headline)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Snaplet Host")
+                    .font(.system(size: 38, weight: .bold, design: .rounded))
+
+                Text("Mac-native dashboard + image server for the iPhone random viewer.")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

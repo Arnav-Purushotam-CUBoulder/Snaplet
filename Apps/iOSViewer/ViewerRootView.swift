@@ -70,25 +70,8 @@ struct ViewerRootView: View {
 
     private var statusPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Snaplet Viewer")
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-
-                    Text(service.hostName ?? "Looking for your Mac host")
-                        .font(.headline)
-                        .foregroundStyle(.white.opacity(0.82))
-                }
-
-                Spacer(minLength: 16)
-
-                Button("Reconnect") {
-                    service.restartDiscovery()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.89, green: 0.48, blue: 0.20))
-            }
+            statusTitleBlock
+            reconnectButton
 
             HStack(spacing: 12) {
                 statusPill(label: service.connectionStatus, tint: Color(red: 0.95, green: 0.55, blue: 0.24))
@@ -102,8 +85,39 @@ struct ViewerRootView: View {
         .background(panelBackground)
     }
 
+    private var statusTitleBlock: some View {
+        HStack(spacing: 12) {
+            Image("SnapletMark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 44, height: 44)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Snaplet")
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .layoutPriority(1)
+
+                Text(service.hostName ?? "Looking for your Mac host")
+                    .font(.headline)
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var reconnectButton: some View {
+        Button("Reconnect") {
+            service.restartDiscovery()
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Color(red: 0.89, green: 0.48, blue: 0.20))
+    }
+
     private var bottomPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let uploadButtonTitle = service.isUploadingImages ? "Uploading…" : "Upload"
+
+        return VStack(alignment: .leading, spacing: 12) {
             if let errorMessage = service.errorMessage {
                 Text(errorMessage)
                     .font(.headline)
@@ -143,7 +157,7 @@ struct ViewerRootView: View {
                     preferredItemEncoding: .current,
                     photoLibrary: .shared()
                 ) {
-                    Label(service.isUploadingImages ? "Uploading…" : "Upload", systemImage: "square.and.arrow.up")
+                    Label(uploadButtonTitle, systemImage: "square.and.arrow.up")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                 }
