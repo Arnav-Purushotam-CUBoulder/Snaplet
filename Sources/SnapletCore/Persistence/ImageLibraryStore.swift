@@ -8,6 +8,7 @@ public enum ImageLibraryStoreError: LocalizedError {
     case failedToPrepareStatement(String)
     case failedToExecuteStatement(String)
     case failedToCopyFile(String)
+    case failedToDeleteFile(String)
     case failedToReadAttributes(String)
 
     public var errorDescription: String? {
@@ -20,6 +21,8 @@ public enum ImageLibraryStoreError: LocalizedError {
             "Failed to execute SQLite statement: \(message)"
         case let .failedToCopyFile(message):
             "Failed to copy image into the local store: \(message)"
+        case let .failedToDeleteFile(message):
+            "Failed to delete an image from the local store: \(message)"
         case let .failedToReadAttributes(message):
             "Failed to read file attributes: \(message)"
         }
@@ -199,6 +202,66 @@ public final class ImageLibraryStore: @unchecked Sendable {
             }
 
             return try asset(withID: assetID)
+        }
+    }
+
+    public func deleteAsset(assetID: UUID) throws -> ImageAsset? {
+        try withLock {
+            guard let asset = try asset(withID: assetID) else {
+                return nil
+            }
+
+            let sourceURL = asset.fileURL(relativeTo: rootDirectory)
+            let stagedRemovalURL = fileManager.temporaryDirectory.appending(path: "snaplet-delete-\(UUID().uuidString)-\(asset.storedFilename)")
+
+            if fileManager.fileExists(atPath: sourceURL.path) {
+                do {
+                    if fileManager.fileExists(atPath: stagedRemovalURL.path) {
+                        try fileManager.removeItem(at: stagedRemovalURL)
+                    }
+                    try fileManager.moveItem(at: sourceURL, to: stagedRemovalURL)
+                } catch {
+                    throw ImageLibraryStoreError.failedToDeleteFile(error.localizedDescription)
+                }
+            }
+
+            do {
+                try Self.execute("BEGIN IMMEDIATE TRANSACTION;", in: database)
+
+                let statement = try Self.prepare(
+                    """
+                    DELETE FROM images
+                    WHERE id = ?;
+                    """,
+                    in: database
+                )
+                defer { sqlite3_finalize(statement) }
+
+                sqlite3_bind_text(statement, 1, assetID.uuidString, -1, sqliteTransient)
+
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
+                }
+
+                try Self.execute("COMMIT;", in: database)
+            } catch {
+                try? Self.execute("ROLLBACK;", in: database)
+
+                if fileManager.fileExists(atPath: stagedRemovalURL.path), !fileManager.fileExists(atPath: sourceURL.path) {
+                    try? fileManager.moveItem(at: stagedRemovalURL, to: sourceURL)
+                }
+                throw error
+            }
+
+            if fileManager.fileExists(atPath: stagedRemovalURL.path) {
+                do {
+                    try fileManager.removeItem(at: stagedRemovalURL)
+                } catch {
+                    throw ImageLibraryStoreError.failedToDeleteFile(error.localizedDescription)
+                }
+            }
+
+            return asset
         }
     }
 

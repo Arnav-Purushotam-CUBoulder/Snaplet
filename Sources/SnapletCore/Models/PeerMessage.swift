@@ -12,6 +12,8 @@ public enum PeerMessageKind: String, Codable, Sendable {
     case uploadComplete
     case setFavorite
     case favoriteStatusUpdated
+    case deleteAsset
+    case assetDeleted
     case failure
 }
 
@@ -115,6 +117,14 @@ public struct PeerMessage: Codable, Equatable, Sendable {
 
     public static func favoriteStatusUpdated(assetID: UUID, isFavorite: Bool) -> PeerMessage {
         PeerMessage(kind: .favoriteStatusUpdated, assetID: assetID, favoriteValue: isFavorite)
+    }
+
+    public static func deleteAsset(assetID: UUID) -> PeerMessage {
+        PeerMessage(kind: .deleteAsset, assetID: assetID)
+    }
+
+    public static func assetDeleted(assetID: UUID, count: Int) -> PeerMessage {
+        PeerMessage(kind: .assetDeleted, libraryCount: count, assetID: assetID)
     }
 
     public static func failure(_ message: String) -> PeerMessage {

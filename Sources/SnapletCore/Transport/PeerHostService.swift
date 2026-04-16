@@ -233,6 +233,36 @@ public final class PeerHostService: NSObject, ObservableObject, @unchecked Senda
         }
     }
 
+    private func handleDeleteRequest(assetID: UUID, from peerID: MCPeerID) {
+        do {
+            guard let deletedAsset = try imageLibraryStore.deleteAsset(assetID: assetID) else {
+                try sendMessage(.failure("That image is no longer indexed on the Mac host."), to: [peerID])
+                updatePublishedState {
+                    $0.appendLog("Delete request from \(peerID.displayName) failed because the asset was missing.")
+                }
+                return
+            }
+
+            let libraryCount = try imageLibraryStore.assetCount()
+            try sendMessage(.assetDeleted(assetID: deletedAsset.id, count: libraryCount), to: session.connectedPeers)
+            invalidatePreparedTransfers(for: .all)
+            invalidatePreparedTransfers(for: .favorites)
+            ensurePreparedTransfers(for: .all)
+            ensurePreparedTransfers(for: .favorites)
+
+            updatePublishedState {
+                $0.appendLog("Deleted \(deletedAsset.originalFilename) for \(peerID.displayName).")
+            }
+            onLibraryMutated?()
+        } catch {
+            updatePublishedState {
+                $0.lastError = error.localizedDescription
+                $0.appendLog("Delete request failed: \(error.localizedDescription)")
+            }
+            try? sendMessage(.failure("Delete failed: \(error.localizedDescription)"), to: [peerID])
+        }
+    }
+
     private func updatePublishedState(_ update: @Sendable @escaping (PeerHostService) -> Void) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -452,7 +482,13 @@ extension PeerHostService: MCSessionDelegate {
                         return
                     }
                     self.handleFavoriteUpdate(assetID: assetID, isFavorite: favoriteValue, from: peerID)
-                case .libraryStatus, .transferReady, .uploadComplete, .favoriteStatusUpdated, .failure:
+                case .deleteAsset:
+                    guard let assetID = message.assetID else {
+                        try? self.sendMessage(.failure("Delete request was missing the asset identifier."), to: [peerID])
+                        return
+                    }
+                    self.handleDeleteRequest(assetID: assetID, from: peerID)
+                case .libraryStatus, .transferReady, .uploadComplete, .favoriteStatusUpdated, .assetDeleted, .failure:
                     break
                 }
             } catch {

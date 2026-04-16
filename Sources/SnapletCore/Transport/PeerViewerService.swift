@@ -38,15 +38,34 @@ private struct ViewerFrame {
 private typealias PendingTransfer = (descriptor: ResourceDescriptor, purpose: ImageRequestPurpose, scope: ImageSelectionScope)
 
 public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sendable {
-    private struct PrefetchPresentationSnapshot {
+    private struct NavigationPresentationSnapshot {
+        let previousFrame: ViewerFrame?
         let nextFrame: ViewerFrame?
         let queueCount: Int
         let anyPrefetchInFlight: Bool
     }
 
+    private enum FrameActivationSource {
+        case freshContent
+        case forwardHistory
+        case backwardHistory
+    }
+
+    private struct FrameActivationResult {
+        let snapshot: NavigationPresentationSnapshot
+        let staleURLs: [URL]
+    }
+
+    private struct AssetRemovalResult {
+        let removedCurrentFrame: ViewerFrame?
+        let staleURLs: [URL]
+        let snapshot: NavigationPresentationSnapshot
+    }
+
     @Published public private(set) var connectionStatus = "Searching for your Mac…"
     @Published public private(set) var hostName: String?
     @Published public private(set) var libraryCount = 0
+    @Published public private(set) var previousImage: SnapletPlatformImage?
     @Published public private(set) var currentImageURL: URL?
     @Published public private(set) var currentFilename: String?
     @Published public private(set) var currentImage: SnapletPlatformImage?
@@ -58,6 +77,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     @Published public private(set) var isPrefetching = false
     @Published public private(set) var isUploadingImages = false
     @Published public private(set) var isUpdatingFavorite = false
+    @Published public private(set) var isDeletingImage = false
     @Published public private(set) var activeSelectionScope: ImageSelectionScope = .all
     @Published public private(set) var uploadStatusMessage: String?
     @Published public private(set) var errorMessage: String?
@@ -71,11 +91,15 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private let stateQueue = DispatchQueue(label: "snaplet.viewer.state")
     private let workQueue = DispatchQueue(label: "snaplet.viewer.service", qos: .userInteractive, attributes: .concurrent)
     private let debugAutoUploadPayloads: [ImageUploadPayload]
+    private let historyDepth = 5
     private let prefetchTargetDepth = 5
     private let maxConcurrentPrefetchRequests = 3
     private var invitedPeerIDs: Set<String> = []
     private var pendingResources: [String: PendingTransfer] = [:]
     private var receivedResources: [String: URL] = [:]
+    private var currentFrameState: ViewerFrame?
+    private var previousFrames: [ViewerFrame] = []
+    private var forwardFrames: [ViewerFrame] = []
     private var prefetchedFrames: [ViewerFrame] = []
     private var outstandingUploadCount = 0
     private var displayRequestInFlight = false
@@ -132,12 +156,11 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
     public func requestNextImage(in scope: ImageSelectionScope? = nil) {
         let targetScope = scope ?? currentSelectionScope()
+        synchronizeCurrentFrameStateIfNeeded()
 
-        guard !session.connectedPeers.isEmpty else {
-            updatePublishedState {
-                $0.errorMessage = "The Mac host is not connected yet."
-                $0.connectionStatus = "Still searching for your Mac…"
-            }
+        if let forwardFrame = takeForwardFrame(matching: targetScope) {
+            promoteHistoryFrame(forwardFrame, source: .forwardHistory)
+            maintainPrefetchPipeline(for: targetScope)
             return
         }
 
@@ -147,24 +170,47 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             return
         }
 
+        guard !session.connectedPeers.isEmpty else {
+            updatePublishedState {
+                $0.errorMessage = "The Mac host is not connected yet."
+                $0.connectionStatus = "Still searching for your Mac…"
+            }
+            return
+        }
+
         requestImage(purpose: .displayNow, scope: targetScope)
     }
 
+    public func requestPreviousImage(in scope: ImageSelectionScope? = nil) {
+        let targetScope = scope ?? currentSelectionScope()
+        synchronizeCurrentFrameStateIfNeeded()
+
+        guard let previousFrame = takePreviousFrame(matching: targetScope) else { return }
+        promoteHistoryFrame(previousFrame, source: .backwardHistory)
+    }
+
     public func setSelectionScope(_ scope: ImageSelectionScope) {
+        synchronizeCurrentFrameStateIfNeeded()
         let previousScope = currentSelectionScope()
         let canReuseCurrentImage = scope == .all || currentImageIsFavorite
         let hadCurrentImage = currentImage != nil
         let removedPrefetchedURLs = discardPrefetchedFramesIfScopeDiffers(from: scope)
-        let removedCurrentURL = hadCurrentImage && !canReuseCurrentImage ? currentImageURL : nil
+        let removedHistoryURLs = discardNavigationHistory()
+        let removedCurrentURL = hadCurrentImage && !canReuseCurrentImage ? clearCurrentFrameState() : nil
 
         setCurrentSelectionScope(scope)
+        if canReuseCurrentImage {
+            setCurrentFrameScope(scope)
+        }
         resetDisplayRequestFlag()
-        publishPrefetchState()
+        publishNavigationState()
 
         updatePublishedState {
             $0.activeSelectionScope = scope
             $0.errorMessage = nil
             $0.isUpdatingFavorite = false
+            $0.isDeletingImage = false
+            $0.previousImage = nil
             $0.nextImage = nil
             $0.prefetchedImageCount = 0
 
@@ -180,6 +226,9 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
         for removedPrefetchedURL in removedPrefetchedURLs {
             try? FileManager.default.removeItem(at: removedPrefetchedURL)
+        }
+        for removedHistoryURL in removedHistoryURLs {
+            try? FileManager.default.removeItem(at: removedHistoryURL)
         }
         if let removedCurrentURL {
             try? FileManager.default.removeItem(at: removedCurrentURL)
@@ -224,6 +273,38 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 self.updatePublishedState {
                     $0.isUpdatingFavorite = false
                     $0.errorMessage = "Favorite update failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    public func deleteCurrentImage() {
+        guard let assetID = currentAssetID else { return }
+        guard !session.connectedPeers.isEmpty else {
+            updatePublishedState {
+                $0.errorMessage = "Connect to the Mac host before deleting images."
+            }
+            return
+        }
+
+        updatePublishedState {
+            $0.isDeletingImage = true
+            $0.errorMessage = nil
+        }
+
+        workQueue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                try self.session.send(
+                    PeerMessage.deleteAsset(assetID: assetID).encoded(),
+                    toPeers: self.session.connectedPeers,
+                    with: .reliable
+                )
+            } catch {
+                self.updatePublishedState {
+                    $0.isDeletingImage = false
+                    $0.errorMessage = "Delete failed: \(error.localizedDescription)"
                 }
             }
         }
@@ -293,7 +374,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 $0.connectionStatus = "Request failed"
                 $0.isLoadingImage = false
             }
-            publishPrefetchState()
+            publishNavigationState()
         }
     }
 
@@ -309,26 +390,26 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     }
 
     private func promotePrefetchedFrame(_ frame: ViewerFrame) {
-        let previousImageURL = currentImageURL
         let hostName = self.hostName
-        let prefetchSnapshot = prefetchPresentationSnapshot()
+        let activation = activateFrameInState(frame, source: .freshContent)
 
         updatePublishedState {
+            $0.previousImage = activation.snapshot.previousFrame?.image
             $0.currentImage = frame.image
             $0.currentImageURL = frame.fileURL
             $0.currentFilename = frame.filename
             $0.currentAssetID = frame.assetID
             $0.currentImageIsFavorite = frame.isFavorite
-            $0.nextImage = prefetchSnapshot.nextFrame?.image
-            $0.prefetchedImageCount = prefetchSnapshot.queueCount
+            $0.nextImage = activation.snapshot.nextFrame?.image
+            $0.prefetchedImageCount = activation.snapshot.queueCount
             $0.isLoadingImage = false
             $0.errorMessage = nil
-            $0.isPrefetching = prefetchSnapshot.anyPrefetchInFlight
+            $0.isPrefetching = activation.snapshot.anyPrefetchInFlight
             $0.connectionStatus = hostName.map { "Connected to \($0)" } ?? "Connected"
         }
 
-        if let previousImageURL, previousImageURL != frame.fileURL {
-            try? FileManager.default.removeItem(at: previousImageURL)
+        for staleURL in activation.staleURLs where staleURL != frame.fileURL {
+            try? FileManager.default.removeItem(at: staleURL)
         }
     }
 
@@ -453,17 +534,21 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         case .favoriteStatusUpdated:
             guard let assetID = message.assetID, let favoriteValue = message.favoriteValue else { return }
             handleFavoriteStatusUpdate(assetID: assetID, isFavorite: favoriteValue)
+        case .assetDeleted:
+            guard let assetID = message.assetID else { return }
+            handleDeletedAsset(assetID: assetID, libraryCount: message.libraryCount)
         case .failure:
             resetDisplayRequestFlag()
             clearAllPrefetchRequestFlags()
             updatePublishedState {
                 $0.isLoadingImage = false
                 $0.isUpdatingFavorite = false
+                $0.isDeletingImage = false
                 $0.errorMessage = message.errorMessage
                 $0.connectionStatus = "Request failed"
             }
-            publishPrefetchState()
-        case .requestRandomImage, .setFavorite:
+            publishNavigationState()
+        case .requestRandomImage, .setFavorite, .deleteAsset:
             break
         }
     }
@@ -476,7 +561,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 $0.errorMessage = error.localizedDescription
                 $0.connectionStatus = "Transfer failed"
             }
-            publishPrefetchState()
+            publishNavigationState()
             return
         }
 
@@ -487,7 +572,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 $0.errorMessage = "The host finished a transfer without a file URL."
                 $0.connectionStatus = "Transfer failed"
             }
-            publishPrefetchState()
+            publishNavigationState()
             return
         }
 
@@ -508,7 +593,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 $0.errorMessage = error.localizedDescription
                 $0.connectionStatus = "Transfer failed"
             }
-            publishPrefetchState()
+            publishNavigationState()
         }
     }
 
@@ -523,7 +608,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                     $0.errorMessage = "Failed to decode \(pendingTransfer.descriptor.originalFilename)."
                     $0.connectionStatus = "Decode failed"
                 }
-                self.publishPrefetchState()
+                self.publishNavigationState()
                 return
             }
 
@@ -539,7 +624,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             let activeScope = self.currentSelectionScope()
             guard frame.scope == activeScope else {
                 self.clearRequestFlag(for: pendingTransfer.purpose, scope: pendingTransfer.scope)
-                self.publishPrefetchState()
+                self.publishNavigationState()
                 try? FileManager.default.removeItem(at: fileURL)
                 return
             }
@@ -555,38 +640,39 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     }
 
     private func promoteDecodedFrame(_ frame: ViewerFrame) {
-        let previousImageURL = currentImageURL
         let hostName = self.hostName
         clearRequestFlag(for: .displayNow, scope: frame.scope)
-        let prefetchSnapshot = prefetchPresentationSnapshot()
+        let activation = activateFrameInState(frame, source: .freshContent)
 
         updatePublishedState {
+            $0.previousImage = activation.snapshot.previousFrame?.image
             $0.currentImage = frame.image
             $0.currentImageURL = frame.fileURL
             $0.currentFilename = frame.filename
             $0.currentAssetID = frame.assetID
             $0.currentImageIsFavorite = frame.isFavorite
-            $0.nextImage = prefetchSnapshot.nextFrame?.image
-            $0.prefetchedImageCount = prefetchSnapshot.queueCount
+            $0.nextImage = activation.snapshot.nextFrame?.image
+            $0.prefetchedImageCount = activation.snapshot.queueCount
             $0.isLoadingImage = false
-            $0.isPrefetching = prefetchSnapshot.anyPrefetchInFlight
+            $0.isPrefetching = activation.snapshot.anyPrefetchInFlight
             $0.errorMessage = nil
             $0.connectionStatus = hostName.map { "Connected to \($0)" } ?? "Connected"
         }
 
-        if let previousImageURL, previousImageURL != frame.fileURL {
-            try? FileManager.default.removeItem(at: previousImageURL)
+        for staleURL in activation.staleURLs where staleURL != frame.fileURL {
+            try? FileManager.default.removeItem(at: staleURL)
         }
     }
 
     private func storePrefetchedFrame(_ frame: ViewerFrame) {
         let removedPrefetchedURLs = storePrefetchedFrameInState(frame)
-        let prefetchSnapshot = prefetchPresentationSnapshot()
+        let navigationSnapshot = navigationPresentationSnapshot()
 
         updatePublishedState {
-            $0.nextImage = prefetchSnapshot.nextFrame?.image
-            $0.prefetchedImageCount = prefetchSnapshot.queueCount
-            $0.isPrefetching = prefetchSnapshot.anyPrefetchInFlight
+            $0.previousImage = navigationSnapshot.previousFrame?.image
+            $0.nextImage = navigationSnapshot.nextFrame?.image
+            $0.prefetchedImageCount = navigationSnapshot.queueCount
+            $0.isPrefetching = navigationSnapshot.anyPrefetchInFlight
             if !$0.isLoadingImage {
                 $0.connectionStatus = $0.hostName.map { "Connected to \($0)" } ?? "Connected"
             }
@@ -844,49 +930,340 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
-    private func reconcilePrefetchedFavoriteState(assetID: UUID, isFavorite: Bool) -> [URL] {
-        stateQueue.sync {
-            var removedURLs: [URL] = []
+    private func synchronizeCurrentFrameStateIfNeeded() {
+        guard let currentImage,
+              let currentImageURL,
+              let currentFilename,
+              let currentAssetID else {
+            return
+        }
 
-            prefetchedFrames.removeAll { frame in
-                guard frame.assetID == assetID else { return false }
-                if frame.scope == .favorites && !isFavorite {
-                    removedURLs.append(frame.fileURL)
+        stateQueue.sync {
+            guard currentFrameState == nil else { return }
+            currentFrameState = ViewerFrame(
+                assetID: currentAssetID,
+                image: currentImage,
+                fileURL: currentImageURL,
+                filename: currentFilename,
+                isFavorite: currentImageIsFavorite,
+                scope: activeSelectionScopeState
+            )
+        }
+    }
+
+    private func takePreviousFrame(matching scope: ImageSelectionScope) -> ViewerFrame? {
+        stateQueue.sync {
+            guard let matchingIndex = previousFrames.indices.last(where: { previousFrames[$0].scope == scope }) else {
+                return nil
+            }
+            return previousFrames.remove(at: matchingIndex)
+        }
+    }
+
+    private func takeForwardFrame(matching scope: ImageSelectionScope) -> ViewerFrame? {
+        stateQueue.sync {
+            guard let matchingIndex = forwardFrames.indices.last(where: { forwardFrames[$0].scope == scope }) else {
+                return nil
+            }
+            return forwardFrames.remove(at: matchingIndex)
+        }
+    }
+
+    private func discardNavigationHistory() -> [URL] {
+        stateQueue.sync {
+            let removedURLs = previousFrames.map(\.fileURL) + forwardFrames.map(\.fileURL)
+            previousFrames.removeAll()
+            forwardFrames.removeAll()
+            return removedURLs
+        }
+    }
+
+    private func clearCurrentFrameState() -> URL? {
+        stateQueue.sync {
+            let removedURL = currentFrameState?.fileURL
+            currentFrameState = nil
+            return removedURL
+        }
+    }
+
+    private func setCurrentFrameScope(_ scope: ImageSelectionScope) {
+        stateQueue.sync {
+            guard let currentFrameState else { return }
+            self.currentFrameState = ViewerFrame(
+                assetID: currentFrameState.assetID,
+                image: currentFrameState.image,
+                fileURL: currentFrameState.fileURL,
+                filename: currentFrameState.filename,
+                isFavorite: currentFrameState.isFavorite,
+                scope: scope
+            )
+        }
+    }
+
+    private func activateFrameInState(_ frame: ViewerFrame, source: FrameActivationSource) -> FrameActivationResult {
+        stateQueue.sync {
+            var staleURLs: [URL] = []
+
+            switch source {
+            case .freshContent:
+                if let currentFrameState {
+                    previousFrames.append(currentFrameState)
+                }
+                staleURLs.append(contentsOf: forwardFrames.map(\.fileURL))
+                forwardFrames.removeAll()
+            case .forwardHistory:
+                if let currentFrameState {
+                    previousFrames.append(currentFrameState)
+                }
+            case .backwardHistory:
+                if let currentFrameState {
+                    forwardFrames.append(currentFrameState)
+                }
+            }
+
+            trimHistoryFrames(&previousFrames, removedURLs: &staleURLs)
+            trimHistoryFrames(&forwardFrames, removedURLs: &staleURLs)
+
+            currentFrameState = frame
+            return FrameActivationResult(
+                snapshot: navigationPresentationSnapshotLocked(),
+                staleURLs: staleURLs
+            )
+        }
+    }
+
+    private func updateFrame(_ frame: ViewerFrame, isFavorite: Bool) -> ViewerFrame {
+        ViewerFrame(
+            assetID: frame.assetID,
+            image: frame.image,
+            fileURL: frame.fileURL,
+            filename: frame.filename,
+            isFavorite: isFavorite,
+            scope: frame.scope
+        )
+    }
+
+    private func trimHistoryFrames(_ frames: inout [ViewerFrame], removedURLs: inout [URL]) {
+        while frames.count > historyDepth {
+            removedURLs.append(frames.removeFirst().fileURL)
+        }
+    }
+
+    private func navigationPresentationSnapshot() -> NavigationPresentationSnapshot {
+        stateQueue.sync {
+            navigationPresentationSnapshotLocked()
+        }
+    }
+
+    private func navigationPresentationSnapshotLocked() -> NavigationPresentationSnapshot {
+        let activeScope = activeSelectionScopeState
+        let activePrefetchedFrames = prefetchedFrames.filter { $0.scope == activeScope }
+        let forwardFrame = forwardFrames.last(where: { $0.scope == activeScope })
+        let previousFrame = previousFrames.last(where: { $0.scope == activeScope })
+
+        return NavigationPresentationSnapshot(
+            previousFrame: previousFrame,
+            nextFrame: forwardFrame ?? activePrefetchedFrames.first,
+            queueCount: activePrefetchedFrames.count,
+            anyPrefetchInFlight: prefetchRequestsInFlight.values.contains(where: { $0 > 0 })
+        )
+    }
+
+    private func publishNavigationState() {
+        let snapshot = navigationPresentationSnapshot()
+        updatePublishedState {
+            $0.previousImage = snapshot.previousFrame?.image
+            $0.nextImage = snapshot.nextFrame?.image
+            $0.prefetchedImageCount = snapshot.queueCount
+            $0.isPrefetching = snapshot.anyPrefetchInFlight
+        }
+    }
+
+    private func reconcileStoredFrameFavoriteState(assetID: UUID, isFavorite: Bool) -> AssetRemovalResult {
+        stateQueue.sync {
+            var staleURLs: [URL] = []
+            let activeScope = activeSelectionScopeState
+            let shouldRemoveFromFavorites = !isFavorite
+            let removedCurrentFrame: ViewerFrame?
+
+            func reconcile(_ frames: inout [ViewerFrame]) {
+                frames.removeAll { frame in
+                    guard frame.assetID == assetID else { return false }
+                    if shouldRemoveFromFavorites && frame.scope == .favorites {
+                        staleURLs.append(frame.fileURL)
+                        return true
+                    }
+                    return false
+                }
+
+                frames = frames.map { frame in
+                    guard frame.assetID == assetID else { return frame }
+                    return updateFrame(frame, isFavorite: isFavorite)
+                }
+            }
+
+            reconcile(&prefetchedFrames)
+            reconcile(&previousFrames)
+            reconcile(&forwardFrames)
+
+            if let currentFrameState, currentFrameState.assetID == assetID {
+                if shouldRemoveFromFavorites && currentFrameState.scope == .favorites && activeScope == .favorites {
+                    removedCurrentFrame = currentFrameState
+                    self.currentFrameState = nil
+                } else {
+                    self.currentFrameState = updateFrame(currentFrameState, isFavorite: isFavorite)
+                    removedCurrentFrame = nil
+                }
+            } else {
+                removedCurrentFrame = nil
+            }
+
+            return AssetRemovalResult(
+                removedCurrentFrame: removedCurrentFrame,
+                staleURLs: staleURLs,
+                snapshot: navigationPresentationSnapshotLocked()
+            )
+        }
+    }
+
+    private func removeStoredAssetState(assetID: UUID) -> AssetRemovalResult {
+        stateQueue.sync {
+            var staleURLs: [URL] = []
+            let removedCurrentFrame: ViewerFrame?
+
+            func strip(_ frames: inout [ViewerFrame]) {
+                frames.removeAll { frame in
+                    guard frame.assetID == assetID else { return false }
+                    staleURLs.append(frame.fileURL)
                     return true
                 }
-                return false
             }
 
-            prefetchedFrames = prefetchedFrames.map { frame in
-                guard frame.assetID == assetID else { return frame }
-                return ViewerFrame(
-                    assetID: frame.assetID,
-                    image: frame.image,
-                    fileURL: frame.fileURL,
-                    filename: frame.filename,
-                    isFavorite: isFavorite,
-                    scope: frame.scope
-                )
+            strip(&prefetchedFrames)
+            strip(&previousFrames)
+            strip(&forwardFrames)
+
+            if let currentFrameState, currentFrameState.assetID == assetID {
+                removedCurrentFrame = currentFrameState
+                self.currentFrameState = nil
+            } else {
+                removedCurrentFrame = nil
             }
 
-            return removedURLs
+            let resourceNames = pendingResources.compactMap { resourceName, pendingTransfer in
+                pendingTransfer.descriptor.assetID == assetID ? resourceName : nil
+            }
+            for resourceName in resourceNames {
+                if let pendingTransfer = pendingResources.removeValue(forKey: resourceName) {
+                    switch pendingTransfer.purpose {
+                    case .displayNow:
+                        displayRequestInFlight = false
+                    case .prefetch:
+                        prefetchRequestsInFlight[pendingTransfer.scope] = max(
+                            0,
+                            prefetchRequestsInFlight[pendingTransfer.scope, default: 0] - 1
+                        )
+                    }
+                }
+
+                if let receivedURL = receivedResources.removeValue(forKey: resourceName) {
+                    staleURLs.append(receivedURL)
+                }
+            }
+
+            return AssetRemovalResult(
+                removedCurrentFrame: removedCurrentFrame,
+                staleURLs: staleURLs,
+                snapshot: navigationPresentationSnapshotLocked()
+            )
+        }
+    }
+
+    private func promoteHistoryFrame(_ frame: ViewerFrame, source: FrameActivationSource) {
+        let hostName = self.hostName
+        let activation = activateFrameInState(frame, source: source)
+
+        updatePublishedState {
+            $0.previousImage = activation.snapshot.previousFrame?.image
+            $0.currentImage = frame.image
+            $0.currentImageURL = frame.fileURL
+            $0.currentFilename = frame.filename
+            $0.currentAssetID = frame.assetID
+            $0.currentImageIsFavorite = frame.isFavorite
+            $0.nextImage = activation.snapshot.nextFrame?.image
+            $0.prefetchedImageCount = activation.snapshot.queueCount
+            $0.isLoadingImage = false
+            $0.isPrefetching = activation.snapshot.anyPrefetchInFlight
+            $0.errorMessage = nil
+            $0.connectionStatus = hostName.map { "Connected to \($0)" } ?? "Connected"
+        }
+
+        for staleURL in activation.staleURLs where staleURL != frame.fileURL {
+            try? FileManager.default.removeItem(at: staleURL)
         }
     }
 
     private func handleFavoriteStatusUpdate(assetID: UUID, isFavorite: Bool) {
         let activeScope = currentSelectionScope()
-        let removedPrefetchedURLs = reconcilePrefetchedFavoriteState(assetID: assetID, isFavorite: isFavorite)
-        let shouldAdvanceFavorites = currentAssetID == assetID && activeScope == .favorites && !isFavorite
-        let removedCurrentURL = shouldAdvanceFavorites ? currentImageURL : nil
+        let removalResult = reconcileStoredFrameFavoriteState(assetID: assetID, isFavorite: isFavorite)
+        let shouldAdvanceFavorites = removalResult.removedCurrentFrame != nil
 
         updatePublishedState {
             if $0.currentAssetID == assetID {
                 $0.currentImageIsFavorite = isFavorite
             }
+            $0.previousImage = removalResult.snapshot.previousFrame?.image
+            $0.nextImage = removalResult.snapshot.nextFrame?.image
+            $0.prefetchedImageCount = removalResult.snapshot.queueCount
+            $0.isPrefetching = removalResult.snapshot.anyPrefetchInFlight
             $0.isUpdatingFavorite = false
             $0.errorMessage = nil
 
-            if shouldAdvanceFavorites {
+            if let removedCurrentFrame = removalResult.removedCurrentFrame {
+                if $0.currentAssetID == removedCurrentFrame.assetID {
+                    $0.currentImage = nil
+                    $0.currentImageURL = nil
+                    $0.currentFilename = nil
+                    $0.currentAssetID = nil
+                    $0.currentImageIsFavorite = false
+                    $0.isLoadingImage = false
+                }
+            }
+        }
+
+        for staleURL in removalResult.staleURLs {
+            try? FileManager.default.removeItem(at: staleURL)
+        }
+        if let removedCurrentFrame = removalResult.removedCurrentFrame {
+            try? FileManager.default.removeItem(at: removedCurrentFrame.fileURL)
+        }
+
+        publishNavigationState()
+        if shouldAdvanceFavorites {
+            requestNextImage(in: .favorites)
+        } else if activeScope == .favorites && !removalResult.staleURLs.isEmpty {
+            maintainPrefetchPipeline(for: .favorites)
+        }
+    }
+
+    private func handleDeletedAsset(assetID: UUID, libraryCount: Int?) {
+        let activeScope = currentSelectionScope()
+        let removalResult = removeStoredAssetState(assetID: assetID)
+        let removedCurrentFrame = removalResult.removedCurrentFrame
+
+        updatePublishedState {
+            if let libraryCount {
+                $0.libraryCount = libraryCount
+            }
+            $0.previousImage = removalResult.snapshot.previousFrame?.image
+            $0.nextImage = removalResult.snapshot.nextFrame?.image
+            $0.prefetchedImageCount = removalResult.snapshot.queueCount
+            $0.isPrefetching = removalResult.snapshot.anyPrefetchInFlight
+            $0.isUpdatingFavorite = false
+            $0.isDeletingImage = false
+            $0.errorMessage = nil
+
+            if let removedCurrentFrame, $0.currentAssetID == removedCurrentFrame.assetID {
                 $0.currentImage = nil
                 $0.currentImageURL = nil
                 $0.currentFilename = nil
@@ -896,18 +1273,16 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             }
         }
 
-        for removedPrefetchedURL in removedPrefetchedURLs {
-            try? FileManager.default.removeItem(at: removedPrefetchedURL)
+        for staleURL in removalResult.staleURLs {
+            try? FileManager.default.removeItem(at: staleURL)
         }
-        if let removedCurrentURL {
-            try? FileManager.default.removeItem(at: removedCurrentURL)
-        }
-
-        publishPrefetchState()
-        if shouldAdvanceFavorites {
-            requestNextImage(in: .favorites)
-        } else if activeScope == .favorites && !removedPrefetchedURLs.isEmpty {
+        if let removedCurrentFrame {
+            try? FileManager.default.removeItem(at: removedCurrentFrame.fileURL)
+            requestNextImage(in: activeScope)
+        } else if activeScope == .favorites {
             maintainPrefetchPipeline(for: .favorites)
+        } else {
+            maintainPrefetchPipeline(for: activeScope)
         }
     }
 
@@ -934,27 +1309,6 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
-    private func prefetchPresentationSnapshot() -> PrefetchPresentationSnapshot {
-        stateQueue.sync {
-            let activeScope = activeSelectionScopeState
-            let activeFrames = prefetchedFrames.filter { $0.scope == activeScope }
-            return PrefetchPresentationSnapshot(
-                nextFrame: activeFrames.first,
-                queueCount: activeFrames.count,
-                anyPrefetchInFlight: prefetchRequestsInFlight.values.contains(where: { $0 > 0 })
-            )
-        }
-    }
-
-    private func publishPrefetchState() {
-        let snapshot = prefetchPresentationSnapshot()
-        updatePublishedState {
-            $0.nextImage = snapshot.nextFrame?.image
-            $0.prefetchedImageCount = snapshot.queueCount
-            $0.isPrefetching = snapshot.anyPrefetchInFlight
-        }
-    }
-
     private func resetTransientState() {
         stateQueue.sync {
             invitedPeerIDs.removeAll()
@@ -962,6 +1316,21 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             displayRequestInFlight = false
             prefetchRequestsInFlight.removeAll()
             outstandingUploadCount = 0
+
+            if let currentFrameState {
+                try? FileManager.default.removeItem(at: currentFrameState.fileURL)
+            }
+            currentFrameState = nil
+
+            for previousFrame in previousFrames {
+                try? FileManager.default.removeItem(at: previousFrame.fileURL)
+            }
+            previousFrames.removeAll()
+
+            for forwardFrame in forwardFrames {
+                try? FileManager.default.removeItem(at: forwardFrame.fileURL)
+            }
+            forwardFrames.removeAll()
 
             for prefetchedFrame in prefetchedFrames {
                 try? FileManager.default.removeItem(at: prefetchedFrame.fileURL)
@@ -1034,7 +1403,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
         return UIImage(
             cgImage: cgImage,
-            scale: displayScale,
+            scale: 1,
             orientation: UIImage.Orientation(cgImagePropertyOrientation: cgOrientation)
         )
         #else
