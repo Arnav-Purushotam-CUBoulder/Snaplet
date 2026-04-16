@@ -1,0 +1,486 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		069E81C3FFA1AB99B22A92CD /* AppSupportPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */; };
+		06AF98F909CA8B3C2B19240E /* ImageLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541336B8F581C95ABE1A39C4 /* ImageLibraryStore.swift */; };
+		2B7689D513A64735CCE0D120 /* PeerViewerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */; };
+		517722A9BE82029B6DB06939 /* HostDashboardModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40525894DE0DA7A34FBF506C /* HostDashboardModel.swift */; };
+		55B02C67138AF4A86FB6FB82 /* LibraryStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40475952308A094782AF1BC0 /* LibraryStatus.swift */; };
+		58280BAF220E6EB372A87581 /* LibraryStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40475952308A094782AF1BC0 /* LibraryStatus.swift */; };
+		5C280E71B2ED6E8D70EDCBA0 /* AppSupportPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */; };
+		684628944CA525480A27DBA9 /* HostDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 310832BF8207DA0398C2CDE3 /* HostDashboardView.swift */; };
+		74425B7C7553CC75B28AE053 /* PeerMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1A85AAEFBC6715BD1C241E /* PeerMessage.swift */; };
+		747973580DAB7E566221B596 /* ImageAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2794C9C96057424CD2F8D700 /* ImageAsset.swift */; };
+		7B69A2B6FAD2E741315BD0DA /* PeerHostService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A261C8408E872FDDC288F7 /* PeerHostService.swift */; };
+		839E1FE70F26BF22D4DA02EB /* SnapletHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0140C4EE4FD9598C46FBF4D9 /* SnapletHostApp.swift */; };
+		985B1AD57670B3AD3650B026 /* ImageAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2794C9C96057424CD2F8D700 /* ImageAsset.swift */; };
+		9E1F4F7636DBA78074BE627B /* SnapletViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CA6E8A86342757CE75558D /* SnapletViewerApp.swift */; };
+		D3DEB3C871D3E9AEB8D8F228 /* ImageLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541336B8F581C95ABE1A39C4 /* ImageLibraryStore.swift */; };
+		DF4A4C57B8968A2D41B6EFDE /* PeerViewerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */; };
+		E5EB233B5919A095818F0CEC /* PeerMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1A85AAEFBC6715BD1C241E /* PeerMessage.swift */; };
+		EE1B1134873B66135B4DB0DE /* PeerHostService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A261C8408E872FDDC288F7 /* PeerHostService.swift */; };
+		F9142E32559B1D673FFE2604 /* ViewerRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE1862CBB5E70C4A984F319B /* ViewerRootView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0140C4EE4FD9598C46FBF4D9 /* SnapletHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapletHostApp.swift; sourceTree = "<group>"; };
+		2794C9C96057424CD2F8D700 /* ImageAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAsset.swift; sourceTree = "<group>"; };
+		310832BF8207DA0398C2CDE3 /* HostDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostDashboardView.swift; sourceTree = "<group>"; };
+		40475952308A094782AF1BC0 /* LibraryStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStatus.swift; sourceTree = "<group>"; };
+		40525894DE0DA7A34FBF506C /* HostDashboardModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostDashboardModel.swift; sourceTree = "<group>"; };
+		4ECE28F2AA815C90E8671088 /* SnapletViewer.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SnapletViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		541336B8F581C95ABE1A39C4 /* ImageLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageLibraryStore.swift; sourceTree = "<group>"; };
+		588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerViewerService.swift; sourceTree = "<group>"; };
+		86CA6E8A86342757CE75558D /* SnapletViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapletViewerApp.swift; sourceTree = "<group>"; };
+		8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSupportPaths.swift; sourceTree = "<group>"; };
+		DE1862CBB5E70C4A984F319B /* ViewerRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerRootView.swift; sourceTree = "<group>"; };
+		E59C7CA4305228848112DAB2 /* SnapletHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SnapletHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F9A261C8408E872FDDC288F7 /* PeerHostService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerHostService.swift; sourceTree = "<group>"; };
+		FC1A85AAEFBC6715BD1C241E /* PeerMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerMessage.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0D1607FC8F59A936FC9D2571 /* SnapletCore */ = {
+			isa = PBXGroup;
+			children = (
+				F37FC29F0059913BF5F2017D /* Models */,
+				A7F30C3EB37319EEB2AA677E /* Persistence */,
+				26F5D4A16886F22637F48FE6 /* Support */,
+				BFE966CDA20AD78CF241C410 /* Transport */,
+			);
+			path = SnapletCore;
+			sourceTree = "<group>";
+		};
+		15DD8447A3B82FB6343953B2 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				0D1607FC8F59A936FC9D2571 /* SnapletCore */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		21C5BCF8F206D762AEACB8FE /* iOSViewer */ = {
+			isa = PBXGroup;
+			children = (
+				86CA6E8A86342757CE75558D /* SnapletViewerApp.swift */,
+				DE1862CBB5E70C4A984F319B /* ViewerRootView.swift */,
+			);
+			path = iOSViewer;
+			sourceTree = "<group>";
+		};
+		26F5D4A16886F22637F48FE6 /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */,
+			);
+			path = Support;
+			sourceTree = "<group>";
+		};
+		714FF84FFB96F257C0CE5FCB = {
+			isa = PBXGroup;
+			children = (
+				A2F8C0819410B7DB63C0FB79 /* Apps */,
+				15DD8447A3B82FB6343953B2 /* Sources */,
+				EAA9C2DEDACB481D9943BBEA /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A2F8C0819410B7DB63C0FB79 /* Apps */ = {
+			isa = PBXGroup;
+			children = (
+				BFFB41FB70A5BE4154AEBD7D /* HostMac */,
+				21C5BCF8F206D762AEACB8FE /* iOSViewer */,
+			);
+			path = Apps;
+			sourceTree = "<group>";
+		};
+		A7F30C3EB37319EEB2AA677E /* Persistence */ = {
+			isa = PBXGroup;
+			children = (
+				541336B8F581C95ABE1A39C4 /* ImageLibraryStore.swift */,
+			);
+			path = Persistence;
+			sourceTree = "<group>";
+		};
+		BFE966CDA20AD78CF241C410 /* Transport */ = {
+			isa = PBXGroup;
+			children = (
+				F9A261C8408E872FDDC288F7 /* PeerHostService.swift */,
+				588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */,
+			);
+			path = Transport;
+			sourceTree = "<group>";
+		};
+		BFFB41FB70A5BE4154AEBD7D /* HostMac */ = {
+			isa = PBXGroup;
+			children = (
+				40525894DE0DA7A34FBF506C /* HostDashboardModel.swift */,
+				310832BF8207DA0398C2CDE3 /* HostDashboardView.swift */,
+				0140C4EE4FD9598C46FBF4D9 /* SnapletHostApp.swift */,
+			);
+			path = HostMac;
+			sourceTree = "<group>";
+		};
+		EAA9C2DEDACB481D9943BBEA /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				E59C7CA4305228848112DAB2 /* SnapletHost.app */,
+				4ECE28F2AA815C90E8671088 /* SnapletViewer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		F37FC29F0059913BF5F2017D /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				2794C9C96057424CD2F8D700 /* ImageAsset.swift */,
+				40475952308A094782AF1BC0 /* LibraryStatus.swift */,
+				FC1A85AAEFBC6715BD1C241E /* PeerMessage.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		64D3A11CC35B379D77AF5A62 /* SnapletViewer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A8546101587903527FC68131 /* Build configuration list for PBXNativeTarget "SnapletViewer" */;
+			buildPhases = (
+				1D41EEFD4FC8AE8582B3B355 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SnapletViewer;
+			packageProductDependencies = (
+			);
+			productName = SnapletViewer;
+			productReference = 4ECE28F2AA815C90E8671088 /* SnapletViewer.app */;
+			productType = "com.apple.product-type.application";
+		};
+		7098AB5C1484CF0E153D8EDA /* SnapletHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 96ADFD898DF9C76961465A60 /* Build configuration list for PBXNativeTarget "SnapletHost" */;
+			buildPhases = (
+				6815B6C25A87FA48A97E90C8 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SnapletHost;
+			packageProductDependencies = (
+			);
+			productName = SnapletHost;
+			productReference = E59C7CA4305228848112DAB2 /* SnapletHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E4A15862B0BC93869E36F5FB /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					64D3A11CC35B379D77AF5A62 = {
+						ProvisioningStyle = Automatic;
+					};
+					7098AB5C1484CF0E153D8EDA = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 2E5A21B56253558410EBD7A6 /* Build configuration list for PBXProject "Snaplet" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 714FF84FFB96F257C0CE5FCB;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7098AB5C1484CF0E153D8EDA /* SnapletHost */,
+				64D3A11CC35B379D77AF5A62 /* SnapletViewer */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1D41EEFD4FC8AE8582B3B355 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				069E81C3FFA1AB99B22A92CD /* AppSupportPaths.swift in Sources */,
+				985B1AD57670B3AD3650B026 /* ImageAsset.swift in Sources */,
+				06AF98F909CA8B3C2B19240E /* ImageLibraryStore.swift in Sources */,
+				55B02C67138AF4A86FB6FB82 /* LibraryStatus.swift in Sources */,
+				EE1B1134873B66135B4DB0DE /* PeerHostService.swift in Sources */,
+				74425B7C7553CC75B28AE053 /* PeerMessage.swift in Sources */,
+				DF4A4C57B8968A2D41B6EFDE /* PeerViewerService.swift in Sources */,
+				9E1F4F7636DBA78074BE627B /* SnapletViewerApp.swift in Sources */,
+				F9142E32559B1D673FFE2604 /* ViewerRootView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6815B6C25A87FA48A97E90C8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5C280E71B2ED6E8D70EDCBA0 /* AppSupportPaths.swift in Sources */,
+				517722A9BE82029B6DB06939 /* HostDashboardModel.swift in Sources */,
+				684628944CA525480A27DBA9 /* HostDashboardView.swift in Sources */,
+				747973580DAB7E566221B596 /* ImageAsset.swift in Sources */,
+				D3DEB3C871D3E9AEB8D8F228 /* ImageLibraryStore.swift in Sources */,
+				58280BAF220E6EB372A87581 /* LibraryStatus.swift in Sources */,
+				7B69A2B6FAD2E741315BD0DA /* PeerHostService.swift in Sources */,
+				E5EB233B5919A095818F0CEC /* PeerMessage.swift in Sources */,
+				2B7689D513A64735CCE0D120 /* PeerViewerService.swift in Sources */,
+				839E1FE70F26BF22D4DA02EB /* SnapletHostApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		24D386BB4CBBF5F10B89BCFB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Apps/HostMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.arnavps.snaplet.host;
+				SDKROOT = macosx;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		5ED4798432A7B72417354AB1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = Apps/iOSViewer/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.arnavps.snaplet.viewer;
+				SDKROOT = iphoneos;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		AD71B5F5AD27FCAC15B16918 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Apps/HostMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.arnavps.snaplet.host;
+				SDKROOT = macosx;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		C02594F985D94A461D9E805B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C04CF1498444C70C27CA52AD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = Apps/iOSViewer/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.arnavps.snaplet.viewer;
+				SDKROOT = iphoneos;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		FE6ABDBDDCE4112E1098AE32 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2E5A21B56253558410EBD7A6 /* Build configuration list for PBXProject "Snaplet" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C02594F985D94A461D9E805B /* Debug */,
+				FE6ABDBDDCE4112E1098AE32 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		96ADFD898DF9C76961465A60 /* Build configuration list for PBXNativeTarget "SnapletHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				24D386BB4CBBF5F10B89BCFB /* Debug */,
+				AD71B5F5AD27FCAC15B16918 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A8546101587903527FC68131 /* Build configuration list for PBXNativeTarget "SnapletViewer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5ED4798432A7B72417354AB1 /* Debug */,
+				C04CF1498444C70C27CA52AD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E4A15862B0BC93869E36F5FB /* Project object */;
+}
