@@ -205,6 +205,14 @@ extension PeerHostService: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
+        if session.connectedPeers.contains(peerID) || !session.connectedPeers.isEmpty {
+            invitationHandler(false, nil)
+            updatePublishedState {
+                $0.appendLog("Rejected duplicate invitation from \(peerID.displayName).")
+            }
+            return
+        }
+
         invitationHandler(true, session)
         updatePublishedState {
             $0.appendLog("Accepted invitation from \(peerID.displayName).")

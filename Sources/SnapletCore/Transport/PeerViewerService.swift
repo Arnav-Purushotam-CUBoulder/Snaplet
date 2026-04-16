@@ -50,8 +50,8 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private let cacheDirectory: URL
     private let uploadStagingDirectory: URL
     private let peerID: MCPeerID
-    private let session: MCSession
-    private let browser: MCNearbyServiceBrowser
+    private var session: MCSession
+    private var browser: MCNearbyServiceBrowser
     private let stateQueue = DispatchQueue(label: "snaplet.viewer.state")
     private let workQueue = DispatchQueue(label: "snaplet.viewer.service", qos: .userInitiated, attributes: .concurrent)
     private let debugAutoUploadPayloads: [ImageUploadPayload]
@@ -63,13 +63,15 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private var displayRequestInFlight = false
     private var prefetchRequestInFlight = false
     private var hasScheduledDebugAutoUpload = false
+    private var isStarted = false
+    private var currentSessionState: MCSessionState = .notConnected
 
     public init(cacheDirectory: URL, displayName: String? = nil) {
         self.cacheDirectory = cacheDirectory
         self.uploadStagingDirectory = cacheDirectory.appending(path: "Uploads", directoryHint: .isDirectory)
         self.peerID = MCPeerID(displayName: displayName ?? Self.defaultDisplayName())
-        self.session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .required)
-        self.browser = MCNearbyServiceBrowser(peer: peerID, serviceType: SnapletPeerConfiguration.serviceType)
+        self.session = Self.makeSession(for: peerID)
+        self.browser = Self.makeBrowser(for: peerID)
         self.debugAutoUploadPayloads = Self.makeDebugAutoUploadPayloads()
 
         super.init()
@@ -82,13 +84,20 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     }
 
     public func start() {
-        browser.startBrowsingForPeers()
+        stateQueue.sync {
+            isStarted = true
+        }
+        beginBrowsing()
         updatePublishedState {
             $0.connectionStatus = "Searching for your Mac…"
         }
     }
 
     public func stop() {
+        stateQueue.sync {
+            isStarted = false
+            currentSessionState = .notConnected
+        }
         browser.stopBrowsingForPeers()
         session.disconnect()
         resetTransientState()
@@ -119,11 +128,11 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     }
 
     public func restartDiscovery() {
-        resetInvitations()
-        browser.stopBrowsingForPeers()
-        browser.startBrowsingForPeers()
+        rebuildTransportStack(disconnectCurrentSession: true)
+        beginBrowsing()
         updatePublishedState {
             $0.errorMessage = nil
+            $0.uploadStatusMessage = nil
             $0.connectionStatus = "Searching for your Mac…"
         }
     }
@@ -573,6 +582,70 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
+    private func beginBrowsing() {
+        browser.stopBrowsingForPeers()
+        browser.startBrowsingForPeers()
+    }
+
+    private func stopBrowsing() {
+        browser.stopBrowsingForPeers()
+    }
+
+    private func rebuildTransportStack(disconnectCurrentSession: Bool) {
+        let oldBrowser = browser
+        let oldSession = session
+
+        oldBrowser.stopBrowsingForPeers()
+        oldBrowser.delegate = nil
+
+        if disconnectCurrentSession {
+            oldSession.disconnect()
+        }
+        oldSession.delegate = nil
+
+        resetTransientState()
+
+        stateQueue.sync {
+            currentSessionState = .notConnected
+        }
+
+        let newSession = Self.makeSession(for: peerID)
+        let newBrowser = Self.makeBrowser(for: peerID)
+        newSession.delegate = self
+        newBrowser.delegate = self
+        session = newSession
+        browser = newBrowser
+    }
+
+    private func scheduleRecovery(afterDisconnecting session: MCSession) {
+        let shouldRecover = stateQueue.sync {
+            isStarted
+        }
+        guard shouldRecover else { return }
+
+        workQueue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            guard session === self.session else { return }
+            self.rebuildTransportStack(disconnectCurrentSession: false)
+            self.beginBrowsing()
+        }
+    }
+
+    private func updateSessionState(_ state: MCSessionState) {
+        stateQueue.sync {
+            currentSessionState = state
+        }
+    }
+
+    private func canInvitePeer(named peerIdentifier: String) -> Bool {
+        stateQueue.sync {
+            guard currentSessionState == .notConnected else { return false }
+            guard !invitedPeerIDs.contains(peerIdentifier) else { return false }
+            invitedPeerIDs.insert(peerIdentifier)
+            return true
+        }
+    }
+
     private func markPeerAsInvited(_ peerIdentifier: String) -> Bool {
         stateQueue.sync {
             guard !invitedPeerIDs.contains(peerIdentifier) else { return false }
@@ -663,6 +736,14 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         return NSImage(contentsOf: url)
         #endif
     }
+
+    private static func makeSession(for peerID: MCPeerID) -> MCSession {
+        MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .required)
+    }
+
+    private static func makeBrowser(for peerID: MCPeerID) -> MCNearbyServiceBrowser {
+        MCNearbyServiceBrowser(peer: peerID, serviceType: SnapletPeerConfiguration.serviceType)
+    }
 }
 
 extension PeerViewerService: MCNearbyServiceBrowserDelegate {
@@ -671,14 +752,14 @@ extension PeerViewerService: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
-        guard session.connectedPeers.isEmpty else {
+        guard browser === self.browser else {
             return
         }
-
         let peerIdentifier = peerID.displayName
-        guard markPeerAsInvited(peerIdentifier) else {
+        guard canInvitePeer(named: peerIdentifier) else {
             return
         }
+        stopBrowsing()
         browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
 
         updatePublishedState {
@@ -688,6 +769,9 @@ extension PeerViewerService: MCNearbyServiceBrowserDelegate {
     }
 
     public func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        guard browser === self.browser else {
+            return
+        }
         let hasConnectedPeers = !session.connectedPeers.isEmpty
         updatePublishedState {
             if $0.hostName == peerID.displayName && !hasConnectedPeers {
@@ -698,6 +782,9 @@ extension PeerViewerService: MCNearbyServiceBrowserDelegate {
     }
 
     public func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+        guard browser === self.browser else {
+            return
+        }
         updatePublishedState {
             $0.errorMessage = error.localizedDescription
             $0.connectionStatus = "Discovery failed"
@@ -707,6 +794,12 @@ extension PeerViewerService: MCNearbyServiceBrowserDelegate {
 
 extension PeerViewerService: MCSessionDelegate {
     public func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
+        guard session === self.session else {
+            return
+        }
+
+        updateSessionState(state)
+
         updatePublishedState {
             switch state {
             case .notConnected:
@@ -718,9 +811,11 @@ extension PeerViewerService: MCSessionDelegate {
                 $0.isPrefetching = false
                 $0.connectionStatus = "Searching for your Mac…"
             case .connecting:
+                self.stopBrowsing()
                 $0.hostName = peerID.displayName
                 $0.connectionStatus = "Connecting to \(peerID.displayName)…"
             case .connected:
+                self.stopBrowsing()
                 $0.hostName = peerID.displayName
                 $0.connectionStatus = "Connected to \(peerID.displayName)"
             @unknown default:
@@ -728,7 +823,9 @@ extension PeerViewerService: MCSessionDelegate {
             }
         }
 
-        if state == .connected {
+        if state == .notConnected {
+            scheduleRecovery(afterDisconnecting: session)
+        } else if state == .connected {
             if scheduleDebugAutoUploadIfNeeded() {
                 updatePublishedState {
                     $0.uploadStatusMessage = "Preparing simulator upload validation…"
