@@ -30,8 +30,8 @@ struct ViewerRootView: View {
     }
 
     var body: some View {
-        ZStack {
-            appBackground
+        ZStack(alignment: .top) {
+            backgroundSurface
 
             Group {
                 switch selectedScreen {
@@ -43,13 +43,16 @@ struct ViewerRootView: View {
                         .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
-        }
-        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: selectedScreen)
-        .safeAreaInset(edge: .top, spacing: 0) {
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+
             ViewerModeSwitcher(selectedMode: $selectedScreen)
                 .padding(.horizontal, 20)
-                .padding(.top, 8)
+                .safeAreaPadding(.top, 8)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
+        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: selectedScreen)
         .onAppear {
             service.start()
         }
@@ -72,16 +75,23 @@ struct ViewerRootView: View {
         }
     }
 
-    private var appBackground: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.06, green: 0.08, blue: 0.12),
-                Color(red: 0.18, green: 0.12, blue: 0.10),
-                Color(red: 0.44, green: 0.22, blue: 0.10)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+    private var backgroundSurface: some View {
+        Group {
+            switch selectedScreen {
+            case .menu:
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.06, green: 0.08, blue: 0.12),
+                        Color(red: 0.18, green: 0.12, blue: 0.10),
+                        Color(red: 0.44, green: 0.22, blue: 0.10)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            case .feed:
+                Color.black
+            }
+        }
         .ignoresSafeArea()
     }
 
@@ -203,38 +213,14 @@ struct ViewerRootView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, 20)
-            .padding(.bottom, 28)
+            .safeAreaPadding(.top, 72)
+            .safeAreaPadding(.bottom, 28)
         }
     }
 
     private var feedScreen: some View {
-        feedSurface
-            .contentShape(Rectangle())
-            .offset(y: feedDragOffset)
-            .animation(.spring(response: 0.34, dampingFraction: 0.84), value: feedDragOffset)
-            .gesture(feedSwipeGesture)
-            .overlay(alignment: .bottom) {
-                if feedDragOffset < -8 {
-                    Text("Release to load the next random image")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(.black.opacity(0.52))
-                        )
-                        .padding(.bottom, 120)
-                }
-            }
-            .ignoresSafeArea()
-    }
-
-    private var feedSurface: some View {
         ZStack {
             Color.black
-                .ignoresSafeArea()
 
             if let image = service.currentImage {
                 Image(uiImage: image)
@@ -243,7 +229,26 @@ struct ViewerRootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
                     .ignoresSafeArea()
-            } else {
+            }
+
+            LinearGradient(
+                colors: [
+                    .black.opacity(0.32),
+                    .clear,
+                    .black.opacity(0.18)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .allowsHitTesting(false)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .offset(y: feedDragOffset)
+        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: feedDragOffset)
+        .gesture(feedSwipeGesture)
+        .overlay {
+            if service.currentImage == nil && !service.isLoadingImage {
                 VStack(spacing: 18) {
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.system(size: 54, weight: .regular))
@@ -253,80 +258,43 @@ struct ViewerRootView: View {
                         .font(.title.weight(.bold))
                         .foregroundStyle(.white)
 
-                    Text("Switch to Feed and swipe up to pull a random image from your Mac host.")
+                    Text("Swipe up to pull a random image from your Mac host.")
                         .font(.body)
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white.opacity(0.8))
                         .padding(.horizontal, 28)
 
-                    if !service.isLoadingImage {
-                        Button {
-                            service.requestNextImage()
-                        } label: {
-                            Label("Load First Image", systemImage: "arrow.up")
-                                .font(.headline)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color(red: 0.89, green: 0.48, blue: 0.20))
+                    Button {
+                        service.requestNextImage()
+                    } label: {
+                        Label("Load First Image", systemImage: "arrow.up")
+                            .font(.headline)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.89, green: 0.48, blue: 0.20))
                 }
-                .padding(.top, 80)
             }
-
-            LinearGradient(
-                colors: [
-                    .clear,
-                    .black.opacity(0.16),
-                    .black.opacity(0.72)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
 
             if service.isLoadingImage {
-                ProgressView("Fetching from your Mac…")
+                ProgressView()
                     .progressViewStyle(.circular)
                     .tint(.white)
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 18)
-                    .background(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .fill(.black.opacity(0.56))
-                    )
+                    .scaleEffect(1.5)
             }
-
-            VStack(alignment: .leading, spacing: 14) {
-                Spacer()
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        viewerInfoChip(service.connectionStatus, tint: Color(red: 0.95, green: 0.55, blue: 0.24))
-                        viewerInfoChip("\(service.libraryCount) indexed", tint: Color(red: 0.26, green: 0.63, blue: 0.49))
-                        if service.isPrefetching {
-                            viewerInfoChip("preloading", tint: Color(red: 0.21, green: 0.42, blue: 0.88))
-                        }
-                    }
-                }
-
-                Text(service.currentFilename ?? "Swipe up to load a random image.")
-                    .font(.title3.weight(.bold))
+        }
+        .overlay(alignment: .bottom) {
+            if feedDragOffset < -8 {
+                Text("Release to load the next random image")
+                    .font(.headline)
                     .foregroundStyle(.white)
-                    .lineLimit(2)
-
-                Text(service.hostName ?? "Looking for your Mac host")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.82))
-
-                if let errorMessage = service.errorMessage {
-                    Text(errorMessage)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.72))
-                }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(.black.opacity(0.52))
+                    )
+                    .safeAreaPadding(.bottom, 32)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 34)
         }
     }
 
@@ -432,7 +400,7 @@ private struct ViewerModeSwitcher: View {
     @Binding var selectedMode: ViewerScreenMode
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             ForEach(ViewerScreenMode.allCases) { mode in
                 Button {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
@@ -440,10 +408,10 @@ private struct ViewerModeSwitcher: View {
                     }
                 } label: {
                     Label(mode.rawValue, systemImage: mode.systemImage)
-                        .font(.subheadline.weight(.semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(selectedMode == mode ? Color.black : .white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                        .padding(.vertical, 7)
                         .background(
                             Capsule(style: .continuous)
                                 .fill(selectedMode == mode ? .white : .white.opacity(0.08))
@@ -452,13 +420,13 @@ private struct ViewerModeSwitcher: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(6)
+        .padding(4)
         .background(.ultraThinMaterial, in: Capsule(style: .continuous))
         .overlay(
             Capsule(style: .continuous)
                 .strokeBorder(.white.opacity(0.12), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.18), radius: 24, x: 0, y: 16)
+        .shadow(color: .black.opacity(0.18), radius: 16, x: 0, y: 10)
     }
 }
 

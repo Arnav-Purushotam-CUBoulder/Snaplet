@@ -300,13 +300,33 @@ extension PeerHostService: MCSessionDelegate {
         at localURL: URL?,
         withError error: Error?
     ) {
+        // MultipeerConnectivity deletes localURL when this callback returns,
+        // so copy it to a stable location synchronously before dispatching.
+        let stableURL: URL?
+        if let localURL, error == nil {
+            let dest = FileManager.default.temporaryDirectory
+                .appending(path: "snaplet-recv-\(UUID().uuidString)")
+            do {
+                try FileManager.default.copyItem(at: localURL, to: dest)
+                stableURL = dest
+            } catch {
+                stableURL = nil
+            }
+        } else {
+            stableURL = localURL
+        }
+
         workQueue.async { [weak self] in
             self?.handleIncomingUpload(
                 named: resourceName,
                 from: peerID,
-                localURL: localURL,
+                localURL: stableURL,
                 error: error
             )
+            // Clean up the stable copy after import has copied it to the library
+            if let stableURL, stableURL != localURL {
+                try? FileManager.default.removeItem(at: stableURL)
+            }
         }
     }
 
