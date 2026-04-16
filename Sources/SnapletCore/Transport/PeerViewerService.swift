@@ -56,6 +56,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
     private let cacheDirectory: URL
     private let uploadStagingDirectory: URL
+    private let displayScale: CGFloat
     private let peerID: MCPeerID
     private var session: MCSession
     private var browser: MCNearbyServiceBrowser
@@ -74,9 +75,10 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private var currentSessionState: MCSessionState = .notConnected
     private var activeSelectionScopeState: ImageSelectionScope = .all
 
-    public init(cacheDirectory: URL, displayName: String? = nil) {
+    public init(cacheDirectory: URL, displayName: String? = nil, displayScale: CGFloat = 1) {
         self.cacheDirectory = cacheDirectory
         self.uploadStagingDirectory = cacheDirectory.appending(path: "Uploads", directoryHint: .isDirectory)
+        self.displayScale = max(displayScale, 1)
         self.peerID = MCPeerID(displayName: displayName ?? Self.defaultDisplayName())
         self.session = Self.makeSession(for: peerID)
         self.browser = Self.makeBrowser(for: peerID)
@@ -492,7 +494,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         workQueue.async { [weak self] in
             guard let self else { return }
 
-            guard let decodedImage = Self.decodeImage(at: fileURL) else {
+            guard let decodedImage = self.decodeImage(at: fileURL) else {
                 self.clearRequestFlag(for: pendingTransfer.purpose)
                 self.updatePublishedState {
                     $0.isLoadingImage = false
@@ -886,7 +888,9 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
     private static func defaultDisplayName() -> String {
         #if os(iOS)
-        UIDevice.current.name
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (Bundle.main.object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String)
+            ?? "Snaplet Viewer"
         #else
         Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         #endif
@@ -916,7 +920,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         #endif
     }
 
-    private static func decodeImage(at url: URL) -> SnapletPlatformImage? {
+    private func decodeImage(at url: URL) -> SnapletPlatformImage? {
         #if os(iOS)
         let sourceOptions = [
             kCGImageSourceShouldCache: false,
@@ -931,11 +935,19 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             kCGImageSourceShouldAllowFloat: true
         ] as CFDictionary
 
+        let imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+        let rawOrientation = imageProperties?[kCGImagePropertyOrientation] as? UInt32 ?? 1
+        let cgOrientation = CGImagePropertyOrientation(rawValue: rawOrientation) ?? .up
+
         guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, decodeOptions) else {
             return nil
         }
 
-        return UIImage(cgImage: cgImage)
+        return UIImage(
+            cgImage: cgImage,
+            scale: displayScale,
+            orientation: UIImage.Orientation(cgImagePropertyOrientation: cgOrientation)
+        )
         #else
         return NSImage(contentsOf: url)
         #endif
@@ -949,6 +961,33 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         MCNearbyServiceBrowser(peer: peerID, serviceType: SnapletPeerConfiguration.serviceType)
     }
 }
+
+#if os(iOS)
+private extension UIImage.Orientation {
+    init(cgImagePropertyOrientation: CGImagePropertyOrientation) {
+        switch cgImagePropertyOrientation {
+        case .up:
+            self = .up
+        case .upMirrored:
+            self = .upMirrored
+        case .down:
+            self = .down
+        case .downMirrored:
+            self = .downMirrored
+        case .left:
+            self = .left
+        case .leftMirrored:
+            self = .leftMirrored
+        case .right:
+            self = .right
+        case .rightMirrored:
+            self = .rightMirrored
+        @unknown default:
+            self = .up
+        }
+    }
+}
+#endif
 
 extension PeerViewerService: MCNearbyServiceBrowserDelegate {
     public func browser(

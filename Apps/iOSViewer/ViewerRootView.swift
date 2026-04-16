@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreTransferable
 import PhotosUI
+import UIKit
 
 private enum ViewerScreenMode: String, CaseIterable, Identifiable {
     case menu = "Menu"
@@ -59,10 +60,18 @@ struct ViewerRootView: View {
     @State private var feedDragOffset: CGFloat = 0
     @State private var selectedUploadItems: [PhotosPickerItem] = []
     @State private var selectedScreen: ViewerScreenMode = .menu
+    @State private var viewerZoomScale: CGFloat = 1
+    @State private var viewerMinimumZoomScale: CGFloat = 1
 
+    @MainActor
     init() {
         let cacheDirectory = (try? AppSupportPaths.viewerCacheDirectory()) ?? FileManager.default.temporaryDirectory
-        _service = StateObject(wrappedValue: PeerViewerService(cacheDirectory: cacheDirectory))
+        _service = StateObject(
+            wrappedValue: PeerViewerService(
+                cacheDirectory: cacheDirectory,
+                displayScale: UIScreen.main.scale
+            )
+        )
     }
 
     var body: some View {
@@ -268,17 +277,20 @@ struct ViewerRootView: View {
 
     private func viewerScreen(for mode: ViewerScreenMode) -> some View {
         let scope = mode.selectionScope ?? .all
+        let canSwipeToAdvance = service.currentImage == nil || viewerZoomScale <= (viewerMinimumZoomScale + 0.01)
 
         return ZStack {
             Color.black
 
-            if let image = service.currentImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-                    .ignoresSafeArea()
+            if let image = service.currentImage, let assetID = service.currentAssetID {
+                ZoomableImageSurface(
+                    image: image,
+                    assetID: assetID,
+                    zoomScale: $viewerZoomScale,
+                    minimumZoomScale: $viewerMinimumZoomScale
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
             }
 
             LinearGradient(
@@ -296,7 +308,7 @@ struct ViewerRootView: View {
         .contentShape(Rectangle())
         .offset(y: feedDragOffset)
         .animation(.spring(response: 0.34, dampingFraction: 0.84), value: feedDragOffset)
-        .gesture(feedSwipeGesture(for: scope))
+        .gesture(feedSwipeGesture(for: scope, enabled: canSwipeToAdvance))
         .overlay {
             if service.currentImage == nil && !service.isLoadingImage {
                 VStack(spacing: 18) {
@@ -342,7 +354,7 @@ struct ViewerRootView: View {
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 10) {
-                if feedDragOffset < -8 {
+                if canSwipeToAdvance && feedDragOffset < -8 {
                     Text(scope == .favorites ? "Release to load the next favorite image" : "Release to load the next random image")
                         .font(.headline)
                         .foregroundStyle(.white)
@@ -382,15 +394,26 @@ struct ViewerRootView: View {
             }
             .safeAreaPadding(.bottom, 18)
         }
+        .onChange(of: service.currentAssetID) { _, _ in
+            viewerZoomScale = viewerMinimumZoomScale
+        }
     }
 
-    private func feedSwipeGesture(for scope: ImageSelectionScope) -> some Gesture {
+    private func feedSwipeGesture(for scope: ImageSelectionScope, enabled: Bool) -> some Gesture {
         DragGesture(minimumDistance: 22)
             .onChanged { value in
+                guard enabled else { return }
                 guard value.translation.height < 0 else { return }
                 feedDragOffset = max(value.translation.height, -160)
             }
             .onEnded { value in
+                guard enabled else {
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) {
+                        feedDragOffset = 0
+                    }
+                    return
+                }
+
                 let shouldLoadNext = value.translation.height < -110 || value.predictedEndTranslation.height < -200
 
                 guard shouldLoadNext else {
@@ -456,6 +479,167 @@ struct ViewerRootView: View {
             filename: selectedFile.filename,
             temporaryFileURL: selectedFile.fileURL
         )
+    }
+}
+
+private struct ZoomableImageSurface: UIViewRepresentable {
+    let image: UIImage
+    let assetID: UUID
+    @Binding var zoomScale: CGFloat
+    @Binding var minimumZoomScale: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> ZoomableImageSurfaceView {
+        let view = ZoomableImageSurfaceView()
+        view.scrollView.delegate = context.coordinator
+        context.coordinator.surfaceView = view
+        return view
+    }
+
+    func updateUIView(_ uiView: ZoomableImageSurfaceView, context: Context) {
+        context.coordinator.parent = self
+        uiView.display(image: image, assetID: assetID)
+        context.coordinator.publishZoomState(from: uiView.scrollView)
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        var parent: ZoomableImageSurface
+        weak var surfaceView: ZoomableImageSurfaceView?
+
+        init(parent: ZoomableImageSurface) {
+            self.parent = parent
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            surfaceView?.imageView
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            surfaceView?.centerImageIfNeeded()
+            publishZoomState(from: scrollView)
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            publishZoomState(from: scrollView)
+        }
+
+        func publishZoomState(from scrollView: UIScrollView) {
+            let currentZoomScale = scrollView.zoomScale
+            let currentMinimumZoomScale = scrollView.minimumZoomScale
+
+            if abs(parent.zoomScale - currentZoomScale) < 0.0001,
+               abs(parent.minimumZoomScale - currentMinimumZoomScale) < 0.0001 {
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.parent.zoomScale = currentZoomScale
+                self.parent.minimumZoomScale = currentMinimumZoomScale
+            }
+        }
+    }
+}
+
+private final class ZoomableImageSurfaceView: UIView {
+    let scrollView = UIScrollView()
+    let imageView = UIImageView()
+
+    private var currentAssetID: UUID?
+    private var currentImageSize: CGSize = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+
+        backgroundColor = .clear
+
+        scrollView.backgroundColor = .clear
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.bouncesZoom = true
+        scrollView.bounces = true
+        scrollView.alwaysBounceVertical = false
+        scrollView.alwaysBounceHorizontal = false
+        scrollView.clipsToBounds = false
+
+        imageView.backgroundColor = .clear
+        imageView.contentMode = .scaleAspectFit
+        imageView.clipsToBounds = false
+
+        addSubview(scrollView)
+        scrollView.addSubview(imageView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scrollView.frame = bounds
+        updateZoomScales(resetZoom: false)
+    }
+
+    func display(image: UIImage, assetID: UUID) {
+        let isNewAsset = currentAssetID != assetID
+        currentAssetID = assetID
+
+        if isNewAsset {
+            imageView.image = image
+            currentImageSize = CGSize(
+                width: max(image.size.width, 1),
+                height: max(image.size.height, 1)
+            )
+            imageView.frame = CGRect(origin: .zero, size: currentImageSize)
+            scrollView.contentSize = currentImageSize
+            scrollView.contentInset = .zero
+            scrollView.contentOffset = .zero
+        }
+
+        updateZoomScales(resetZoom: isNewAsset)
+    }
+
+    func centerImageIfNeeded() {
+        let scaledContentWidth = imageView.frame.width * scrollView.zoomScale
+        let scaledContentHeight = imageView.frame.height * scrollView.zoomScale
+        let horizontalInset = max((bounds.width - scaledContentWidth) * 0.5, 0)
+        let verticalInset = max((bounds.height - scaledContentHeight) * 0.5, 0)
+
+        scrollView.contentInset = UIEdgeInsets(
+            top: verticalInset,
+            left: horizontalInset,
+            bottom: verticalInset,
+            right: horizontalInset
+        )
+    }
+
+    private func updateZoomScales(resetZoom: Bool) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        guard currentImageSize.width > 0, currentImageSize.height > 0 else { return }
+
+        let widthScale = bounds.width / currentImageSize.width
+        let heightScale = bounds.height / currentImageSize.height
+        let fitScale = min(widthScale, heightScale)
+
+        // Keep smaller assets at native size, but fit larger ones on screen without cropping.
+        let minimumScale = min(fitScale, 1)
+        let maximumScale = max(minimumScale * 8, 4)
+        let currentScale = scrollView.zoomScale == 0 ? minimumScale : scrollView.zoomScale
+        let clampedScale = min(max(currentScale, minimumScale), maximumScale)
+
+        scrollView.minimumZoomScale = minimumScale
+        scrollView.maximumZoomScale = maximumScale
+
+        let targetScale = resetZoom ? minimumScale : clampedScale
+        if abs(scrollView.zoomScale - targetScale) > 0.0001 {
+            scrollView.zoomScale = targetScale
+        }
+
+        centerImageIfNeeded()
     }
 }
 
