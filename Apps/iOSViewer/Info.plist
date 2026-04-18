@@ -22,6 +22,11 @@
 	<array>
 		<string>_snpimgfeed._tcp</string>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Snaplet Viewer discovers your Mac host and requests images over a direct local session.</string>
 	<key>UILaunchScreen</key>

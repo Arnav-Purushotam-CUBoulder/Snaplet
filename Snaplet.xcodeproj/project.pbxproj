@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		069E81C3FFA1AB99B22A92CD /* AppSupportPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */; };
 		06AF98F909CA8B3C2B19240E /* ImageLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541336B8F581C95ABE1A39C4 /* ImageLibraryStore.swift */; };
+		19ACC0B87AC94DB38C5ACDD7 /* MediaStreamingServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EBB40E4740449675DAE1DF3 /* MediaStreamingServer.swift */; };
 		1E544DCE2B8412112EE84EBC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EE3B01A7E21050FD9C541BA5 /* Assets.xcassets */; };
 		2B7689D513A64735CCE0D120 /* PeerViewerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */; };
 		517722A9BE82029B6DB06939 /* HostDashboardModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40525894DE0DA7A34FBF506C /* HostDashboardModel.swift */; };
@@ -22,18 +23,23 @@
 		839E1FE70F26BF22D4DA02EB /* SnapletHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0140C4EE4FD9598C46FBF4D9 /* SnapletHostApp.swift */; };
 		985B1AD57670B3AD3650B026 /* ImageAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2794C9C96057424CD2F8D700 /* ImageAsset.swift */; };
 		9E1F4F7636DBA78074BE627B /* SnapletViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CA6E8A86342757CE75558D /* SnapletViewerApp.swift */; };
+		C7A6807FF98FD762B544B5FD /* SnapletMetadataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 043F5D3ABE5B161883A0CAFB /* SnapletMetadataStore.swift */; };
 		D3DEB3C871D3E9AEB8D8F228 /* ImageLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541336B8F581C95ABE1A39C4 /* ImageLibraryStore.swift */; };
 		DF4A4C57B8968A2D41B6EFDE /* PeerViewerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 588B4EEC9710C0078CF5E221 /* PeerViewerService.swift */; };
 		E5EB233B5919A095818F0CEC /* PeerMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1A85AAEFBC6715BD1C241E /* PeerMessage.swift */; };
 		EE1B1134873B66135B4DB0DE /* PeerHostService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A261C8408E872FDDC288F7 /* PeerHostService.swift */; };
 		F3288CF2B51ABF4DDF4C9610 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EE3B01A7E21050FD9C541BA5 /* Assets.xcassets */; };
 		F9142E32559B1D673FFE2604 /* ViewerRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE1862CBB5E70C4A984F319B /* ViewerRootView.swift */; };
+		FD3E0BC4B8BCC22A908A2EBD /* SnapletMetadataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 043F5D3ABE5B161883A0CAFB /* SnapletMetadataStore.swift */; };
+		FE0C7E806BD0901FC85BF4E7 /* MediaStreamingServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EBB40E4740449675DAE1DF3 /* MediaStreamingServer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		0140C4EE4FD9598C46FBF4D9 /* SnapletHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapletHostApp.swift; sourceTree = "<group>"; };
+		043F5D3ABE5B161883A0CAFB /* SnapletMetadataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapletMetadataStore.swift; sourceTree = "<group>"; };
 		2794C9C96057424CD2F8D700 /* ImageAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAsset.swift; sourceTree = "<group>"; };
 		310832BF8207DA0398C2CDE3 /* HostDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostDashboardView.swift; sourceTree = "<group>"; };
+		3EBB40E4740449675DAE1DF3 /* MediaStreamingServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaStreamingServer.swift; sourceTree = "<group>"; };
 		40475952308A094782AF1BC0 /* LibraryStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStatus.swift; sourceTree = "<group>"; };
 		40525894DE0DA7A34FBF506C /* HostDashboardModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostDashboardModel.swift; sourceTree = "<group>"; };
 		4ECE28F2AA815C90E8671088 /* SnapletViewer.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SnapletViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -82,6 +88,8 @@
 			isa = PBXGroup;
 			children = (
 				8D72F02C1A1E0794DD1325C5 /* AppSupportPaths.swift */,
+				3EBB40E4740449675DAE1DF3 /* MediaStreamingServer.swift */,
+				043F5D3ABE5B161883A0CAFB /* SnapletMetadataStore.swift */,
 			);
 			path = Support;
 			sourceTree = "<group>";
@@ -255,9 +263,11 @@
 				985B1AD57670B3AD3650B026 /* ImageAsset.swift in Sources */,
 				06AF98F909CA8B3C2B19240E /* ImageLibraryStore.swift in Sources */,
 				55B02C67138AF4A86FB6FB82 /* LibraryStatus.swift in Sources */,
+				FE0C7E806BD0901FC85BF4E7 /* MediaStreamingServer.swift in Sources */,
 				EE1B1134873B66135B4DB0DE /* PeerHostService.swift in Sources */,
 				74425B7C7553CC75B28AE053 /* PeerMessage.swift in Sources */,
 				DF4A4C57B8968A2D41B6EFDE /* PeerViewerService.swift in Sources */,
+				FD3E0BC4B8BCC22A908A2EBD /* SnapletMetadataStore.swift in Sources */,
 				9E1F4F7636DBA78074BE627B /* SnapletViewerApp.swift in Sources */,
 				F9142E32559B1D673FFE2604 /* ViewerRootView.swift in Sources */,
 			);
@@ -273,10 +283,12 @@
 				747973580DAB7E566221B596 /* ImageAsset.swift in Sources */,
 				D3DEB3C871D3E9AEB8D8F228 /* ImageLibraryStore.swift in Sources */,
 				58280BAF220E6EB372A87581 /* LibraryStatus.swift in Sources */,
+				19ACC0B87AC94DB38C5ACDD7 /* MediaStreamingServer.swift in Sources */,
 				7B69A2B6FAD2E741315BD0DA /* PeerHostService.swift in Sources */,
 				E5EB233B5919A095818F0CEC /* PeerMessage.swift in Sources */,
 				2B7689D513A64735CCE0D120 /* PeerViewerService.swift in Sources */,
 				839E1FE70F26BF22D4DA02EB /* SnapletHostApp.swift in Sources */,
+				C7A6807FF98FD762B544B5FD /* SnapletMetadataStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

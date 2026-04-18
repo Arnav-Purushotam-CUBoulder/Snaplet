@@ -14,6 +14,10 @@ let package = Package(
             targets: ["SnapletCore"]
         ),
         .executable(
+            name: "SnapletAdmin",
+            targets: ["SnapletAdmin"]
+        ),
+        .executable(
             name: "SnapletSmokeTests",
             targets: ["SnapletSmokeTests"]
         )
@@ -22,6 +26,10 @@ let package = Package(
         .target(
             name: "SnapletCore",
             exclude: ["Assets.xcassets"]
+        ),
+        .executableTarget(
+            name: "SnapletAdmin",
+            dependencies: ["SnapletCore"]
         ),
         .executableTarget(
             name: "SnapletSmokeTests",

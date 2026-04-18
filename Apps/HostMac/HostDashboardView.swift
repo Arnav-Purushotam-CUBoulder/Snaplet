@@ -55,12 +55,12 @@ struct HostDashboardView: View {
         .fontDesign(.rounded)
         .fileImporter(
             isPresented: $isImporting,
-            allowedContentTypes: [.image],
+            allowedContentTypes: [.image, .movie, .video],
             allowsMultipleSelection: true
         ) { result in
             switch result {
             case let .success(urls):
-                model.importImages(from: urls)
+                model.importAssets(from: urls)
             case let .failure(error):
                 model.errorMessage = error.localizedDescription
             }
@@ -80,17 +80,29 @@ struct HostDashboardView: View {
                 Text("Snaplet Host")
                     .font(.system(size: 38, weight: .bold, design: .rounded))
 
-                Text("Mac-native dashboard + image server for the iPhone random viewer.")
+                Text("Mac-native dashboard and media server for the iPhone random viewer.")
                     .font(.headline)
                     .foregroundStyle(.secondary)
+
+                if let viewerDevice = model.metadata.viewerDevice {
+                    Text("Viewer Device: \(viewerDevice.modelName)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(red: 0.40, green: 0.24, blue: 0.14))
+                }
             }
         }
     }
 
     private var actionRow: some View {
         HStack(spacing: 16) {
-            Button("Import Images…") {
+            Button("Import Media…") {
                 isImporting = true
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button("Reindex Library") {
+                model.reindexLibrary()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -121,15 +133,23 @@ struct HostDashboardView: View {
         let columns = [
             GridItem(.flexible(), spacing: 18),
             GridItem(.flexible(), spacing: 18),
+            GridItem(.flexible(), spacing: 18),
             GridItem(.flexible(), spacing: 18)
         ]
 
         return LazyVGrid(columns: columns, spacing: 18) {
             MetricCard(
-                title: "Indexed Images",
-                value: "\(model.libraryStatus.imageCount)",
-                subtitle: model.libraryStatus.latestAsset?.originalFilename ?? "Import your first image set",
+                title: "Indexed Photos",
+                value: "\(model.libraryStatus.photoCount)",
+                subtitle: model.libraryStatus.latestAsset?.originalFilename ?? "Import or reindex your first media set",
                 tint: Color(red: 0.72, green: 0.37, blue: 0.18)
+            )
+
+            MetricCard(
+                title: "Indexed Videos",
+                value: "\(model.libraryStatus.videoCount)",
+                subtitle: "\(model.libraryStatus.favoriteVideoCount) favorite video\(model.libraryStatus.favoriteVideoCount == 1 ? "" : "s")",
+                tint: Color(red: 0.20, green: 0.33, blue: 0.62)
             )
 
             if let hostService = model.hostService {
@@ -155,7 +175,7 @@ struct HostDashboardView: View {
 
     private var contentSection: some View {
         HStack(alignment: .top, spacing: 20) {
-            RecentImagesPanel(assets: model.libraryStatus.recentAssets)
+            RecentMediaPanel(assets: model.libraryStatus.recentAssets)
 
             if let hostService = model.hostService {
                 HostActivityPanel(service: hostService)
@@ -169,7 +189,7 @@ struct HostDashboardView: View {
     }
 
     private var footerNote: some View {
-        Text("Transport uses MultipeerConnectivity for direct discovery and transfer between your Mac and iPhone. The host image store and SQLite index live on the Seagate Expansion Drive. Apple may still choose infrastructure Wi-Fi, peer-to-peer Wi-Fi, or Bluetooth underneath the session.")
+        Text("Transport uses MultipeerConnectivity for direct discovery and transfer between your Mac and iPhone. The host media store and SQLite index live on the Seagate Expansion Drive, with photos in `Photos/` and videos in `Videos/`. Apple may still choose infrastructure Wi-Fi, peer-to-peer Wi-Fi, or Bluetooth underneath the session.")
             .font(.footnote)
             .foregroundStyle(.secondary)
             .padding(.top, 4)
@@ -260,7 +280,7 @@ private struct HostAdvertisingCard: View {
     }
 }
 
-private struct RecentImagesPanel: View {
+private struct RecentMediaPanel: View {
     let assets: [ImageAsset]
 
     var body: some View {
@@ -270,8 +290,8 @@ private struct RecentImagesPanel: View {
 
             if assets.isEmpty {
                 PlaceholderPanel(
-                    title: "No Images Yet",
-                    message: "Import a few JPG, PNG, HEIC, or GIF files to seed the random viewer."
+                    title: "No Media Yet",
+                    message: "Import photos or videos, or run a reindex to pull the full library into SQLite."
                 )
             } else {
                 VStack(spacing: 12) {
@@ -281,7 +301,7 @@ private struct RecentImagesPanel: View {
                                 .fill(Color(red: 0.27, green: 0.18, blue: 0.14))
                                 .frame(width: 56, height: 56)
                                 .overlay(
-                                    Image(systemName: "photo")
+                                    Image(systemName: asset.mediaType.systemImage)
                                         .font(.title3)
                                         .foregroundStyle(.white.opacity(0.9))
                                 )
@@ -294,6 +314,10 @@ private struct RecentImagesPanel: View {
                                 Text(ByteCountFormatter.string(fromByteCount: asset.byteSize, countStyle: .file))
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
+
+                                Text(asset.mediaType == .photo ? "Photo" : "Video")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(asset.mediaType == .photo ? Color(red: 0.54, green: 0.28, blue: 0.15) : Color(red: 0.18, green: 0.34, blue: 0.64))
 
                                 Text(asset.importedAt.formatted(date: .abbreviated, time: .shortened))
                                     .font(.caption)
@@ -341,7 +365,7 @@ private struct HostActivityPanel: View {
             if service.activityLog.isEmpty {
                 PlaceholderPanel(
                     title: "Quiet Session",
-                    message: "Once the iPhone connects and starts requesting images, transfers and state changes will appear here."
+                    message: "Once the iPhone connects and starts requesting media, transfers and state changes will appear here."
                 )
             } else {
                 ScrollView {

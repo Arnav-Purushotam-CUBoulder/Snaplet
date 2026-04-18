@@ -6,6 +6,7 @@ enum SnapletSmokeTests {
     static func main() throws {
         try verifyImageLibraryStore()
         try verifyPeerMessageRoundTrip()
+        try verifyMediaStreamingServer()
         print("Snaplet smoke tests passed.")
     }
 
@@ -54,6 +55,7 @@ enum SnapletSmokeTests {
         let originalMessage = PeerMessage.transferReady(
             ResourceDescriptor(
                 assetID: UUID(),
+                mediaType: .photo,
                 resourceName: "asset.jpg",
                 originalFilename: "sample.jpg",
                 byteSize: 2_048,
@@ -68,19 +70,95 @@ enum SnapletSmokeTests {
         try assert(decoded == originalMessage, "Expected peer message JSON round-trip to preserve the payload.")
     }
 
+    private static func verifyMediaStreamingServer() throws {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try fileManager.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer {
+            try? fileManager.removeItem(at: temporaryDirectory)
+        }
+
+        let videoURL = temporaryDirectory.appending(path: "sample.mp4")
+        let sourceBytes = Data((0..<64).map { UInt8($0) })
+        try sourceBytes.write(to: videoURL)
+
+        let server = MediaStreamingServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+
+        var streamURL: URL?
+        for _ in 0..<40 {
+            streamURL = server.registerVideo(at: videoURL, byteSize: Int64(sourceBytes.count))
+            if streamURL != nil {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        guard let streamURL else {
+            throw SmokeTestFailure(message: "Expected media streaming server to publish a usable URL.")
+        }
+
+        var request = URLRequest(url: streamURL)
+        request.setValue("bytes=4-7", forHTTPHeaderField: "Range")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultBox = StreamingRequestResultBox()
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            resultBox.data = data
+            resultBox.response = response
+            resultBox.error = error
+            semaphore.signal()
+        }
+        .resume()
+
+        semaphore.wait()
+
+        try assert(resultBox.error == nil, "Expected media streaming request to finish without an error.")
+        let httpResponse = try assertResponse(resultBox.response, expectedStatusCode: 206)
+        try assert(
+            httpResponse.value(forHTTPHeaderField: "Accept-Ranges")?.lowercased() == "bytes",
+            "Expected media streaming response to advertise byte ranges."
+        )
+        try assert(resultBox.data == Data([4, 5, 6, 7]), "Expected media streaming range response to match the requested bytes.")
+    }
+
     private static func assert(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if condition() {
             return
         }
 
-        struct SmokeTestFailure: LocalizedError {
-            let message: String
-
-            var errorDescription: String? {
-                message
-            }
-        }
-
         throw SmokeTestFailure(message: message)
     }
+
+    private static func assertResponse(_ response: URLResponse?, expectedStatusCode: Int) throws -> HTTPURLResponse {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SmokeTestFailure(message: "Expected an HTTP response from the media streaming server.")
+        }
+
+        guard httpResponse.statusCode == expectedStatusCode else {
+            throw SmokeTestFailure(
+                message: "Expected HTTP \(expectedStatusCode) from the media streaming server but received \(httpResponse.statusCode)."
+            )
+        }
+
+        return httpResponse
+    }
+}
+
+private struct SmokeTestFailure: LocalizedError {
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
+}
+
+private final class StreamingRequestResultBox: @unchecked Sendable {
+    var data: Data?
+    var response: URLResponse?
+    var error: Error?
 }

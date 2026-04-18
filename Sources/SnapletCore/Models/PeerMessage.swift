@@ -25,27 +25,87 @@ public enum ImageRequestPurpose: String, Codable, Sendable {
 public enum ImageSelectionScope: String, Codable, Sendable {
     case all
     case favorites
+    case videos
+    case favoriteVideos
+
+    public var mediaType: MediaType {
+        switch self {
+        case .all, .favorites:
+            .photo
+        case .videos, .favoriteVideos:
+            .video
+        }
+    }
+
+    public var favoritesOnly: Bool {
+        switch self {
+        case .favorites, .favoriteVideos:
+            true
+        case .all, .videos:
+            false
+        }
+    }
+
+    public var isVideoScope: Bool {
+        mediaType == .video
+    }
+
+    public var isPhotoScope: Bool {
+        mediaType == .photo
+    }
+
+    public var tabTitle: String {
+        switch self {
+        case .all:
+            "Photos"
+        case .favorites:
+            "Favorite Photos"
+        case .videos:
+            "Videos"
+        case .favoriteVideos:
+            "Favorite Videos"
+        }
+    }
+
+    public var emptyStateTitle: String {
+        switch self {
+        case .all:
+            "No Photos Yet"
+        case .favorites:
+            "No Favorite Photos"
+        case .videos:
+            "No Videos Yet"
+        case .favoriteVideos:
+            "No Favorite Videos"
+        }
+    }
 }
 
 public struct ResourceDescriptor: Codable, Equatable, Sendable {
     public let assetID: UUID
+    public let mediaType: MediaType
     public let resourceName: String
     public let originalFilename: String
     public let byteSize: Int64
     public let isFavorite: Bool
+    public let streamURL: URL?
 
     public init(
         assetID: UUID,
+        mediaType: MediaType,
         resourceName: String,
         originalFilename: String,
         byteSize: Int64,
-        isFavorite: Bool
+        isFavorite: Bool,
+        streamURL: URL? = nil
     ) {
         self.assetID = assetID
+        self.mediaType = mediaType
         self.resourceName = resourceName
         self.originalFilename = originalFilename
         self.byteSize = byteSize
         self.isFavorite = isFavorite
+        self.streamURL = streamURL
     }
 }
 
