@@ -79,11 +79,16 @@ struct ViewerRootView: View {
     @StateObject private var service: PeerViewerService
     @State private var feedDragOffset: CGFloat = 0
     @State private var isAnimatingFeedAdvance = false
+    @State private var isInteractingWithVideoControls = false
     @State private var selectedUploadItems: [PhotosPickerItem] = []
     @State private var selectedScreen: ViewerScreenMode = .menu
     @State private var viewerZoomScale: CGFloat = 1
     @State private var viewerMinimumZoomScale: CGFloat = 1
     @State private var isPresentingDeleteConfirmation = false
+    private let screenTransitionAnimation = Animation.easeInOut(duration: 0.24)
+    private let feedSlideAnimation = Animation.timingCurve(0.22, 0.92, 0.28, 1, duration: 0.22)
+    private let feedReturnAnimation = Animation.interactiveSpring(response: 0.24, dampingFraction: 0.9, blendDuration: 0.08)
+    private let feedNudgeAnimation = Animation.easeOut(duration: 0.12)
 
     @MainActor
     init() {
@@ -104,21 +109,11 @@ struct ViewerRootView: View {
                 backgroundSurface
 
                 Group {
-                    switch selectedScreen {
-                    case .menu:
+                    if selectedScreen == .menu {
                         menuScreen(topInset: topInset)
                             .transition(.opacity.combined(with: .move(edge: .leading)))
-                    case .photos:
-                        viewerScreen(for: .photos)
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
-                    case .favoritePhotos:
-                        viewerScreen(for: .favoritePhotos)
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
-                    case .videos:
-                        viewerScreen(for: .videos)
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
-                    case .favoriteVideos:
-                        viewerScreen(for: .favoriteVideos)
+                    } else {
+                        viewerScreen(for: selectedScreen)
                             .transition(.opacity.combined(with: .move(edge: .trailing)))
                     }
                 }
@@ -133,7 +128,6 @@ struct ViewerRootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: selectedScreen)
         .onAppear {
             service.start()
         }
@@ -145,6 +139,7 @@ struct ViewerRootView: View {
             withTransaction(resetTransaction) {
                 feedDragOffset = 0
                 isAnimatingFeedAdvance = false
+                isInteractingWithVideoControls = false
             }
             guard let scope = screen.selectionScope else { return }
             service.setSelectionScope(scope)
@@ -245,9 +240,7 @@ struct ViewerRootView: View {
                 ViewerMenuCard(title: "Actions", subtitle: "Jump into the viewer or send up to 100 photos and videos to the Mac host.") {
                     VStack(spacing: 12) {
                         Button {
-                            withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
-                                selectedScreen = .photos
-                            }
+                            transitionToScreen(.photos)
                         } label: {
                             Label(service.currentAssetID == nil ? "Open Photos" : "Back to Photos", systemImage: "arrow.up.forward.app")
                                 .font(.headline)
@@ -257,9 +250,7 @@ struct ViewerRootView: View {
                         .tint(Color(red: 0.80, green: 0.38, blue: 0.15))
 
                         Button {
-                            withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
-                                selectedScreen = .videos
-                            }
+                            transitionToScreen(.videos)
                             service.setSelectionScope(.videos)
                             service.requestNextImage(in: .videos)
                         } label: {
@@ -333,6 +324,7 @@ struct ViewerRootView: View {
             let canSwipeFeed = service.currentAssetID != nil
                 && (service.currentMediaType == .video || viewerZoomScale <= (viewerMinimumZoomScale + 0.01))
                 && !isAnimatingFeedAdvance
+                && !isInteractingWithVideoControls
             let canSwipeToPrevious = service.previousImage != nil
 
             ZStack {
@@ -387,7 +379,10 @@ struct ViewerRootView: View {
                             AutoplayVideoSurface(
                                 assetID: assetID,
                                 videoURL: currentMediaURL,
-                                previewImage: service.currentImage
+                                previewImage: service.currentImage,
+                                onInteractionChanged: { isInteracting in
+                                    isInteractingWithVideoControls = isInteracting
+                                }
                             )
                             .onAppear {
                                 viewerZoomScale = 1
@@ -395,7 +390,6 @@ struct ViewerRootView: View {
                             }
                         }
                     }
-                    .id(assetID)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .offset(y: feedDragOffset)
                     .ignoresSafeArea()
@@ -562,6 +556,7 @@ struct ViewerRootView: View {
                 withTransaction(resetTransaction) {
                     feedDragOffset = 0
                     isAnimatingFeedAdvance = false
+                    isInteractingWithVideoControls = false
                 }
             }
         }
@@ -576,7 +571,7 @@ struct ViewerRootView: View {
         canLoadPrevious: Bool
     ) {
         guard enabled else {
-            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.9, blendDuration: 0.08)) {
+            withAnimation(feedReturnAnimation) {
                 feedDragOffset = 0
             }
             return
@@ -588,7 +583,7 @@ struct ViewerRootView: View {
         let shouldLoadNext = projectedTranslation < -dragThreshold
 
         guard shouldLoadPrevious || shouldLoadNext else {
-            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.9, blendDuration: 0.08)) {
+            withAnimation(feedReturnAnimation) {
                 feedDragOffset = 0
             }
             return
@@ -606,28 +601,16 @@ struct ViewerRootView: View {
 
         if service.nextImage != nil {
             isAnimatingFeedAdvance = true
-            withAnimation(.timingCurve(0.22, 0.92, 0.28, 1, duration: 0.22)) {
-                feedDragOffset = -viewportHeight
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            animateFeedOffsetChange(to: -viewportHeight, animation: feedSlideAnimation) {
                 service.requestNextImage(in: scope)
-                let resetTransaction = Transaction(animation: nil)
-                withTransaction(resetTransaction) {
-                    feedDragOffset = 0
-                    isAnimatingFeedAdvance = false
-                }
+                resetFeedAnimationState()
             }
             return
         }
 
-        withAnimation(.easeOut(duration: 0.12)) {
-            feedDragOffset = -min(max(viewportHeight * 0.04, 20), 44)
-        }
-
-        service.requestNextImage(in: scope)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            withAnimation(.interactiveSpring(response: 0.28, dampingFraction: 0.9, blendDuration: 0.08)) {
+        animateFeedOffsetChange(to: -min(max(viewportHeight * 0.04, 20), 44), animation: feedNudgeAnimation) {
+            service.requestNextImage(in: scope)
+            withAnimation(feedReturnAnimation) {
                 feedDragOffset = 0
             }
         }
@@ -637,17 +620,40 @@ struct ViewerRootView: View {
         guard !isAnimatingFeedAdvance else { return }
 
         isAnimatingFeedAdvance = true
-        withAnimation(.timingCurve(0.22, 0.92, 0.28, 1, duration: 0.22)) {
-            feedDragOffset = viewportHeight
+        animateFeedOffsetChange(to: viewportHeight, animation: feedSlideAnimation) {
+            service.requestPreviousImage(in: scope)
+            resetFeedAnimationState()
+        }
+    }
+
+    private func transitionToScreen(_ screen: ViewerScreenMode) {
+        guard selectedScreen != screen else { return }
+
+        withAnimation(screenTransitionAnimation) {
+            selectedScreen = screen
+        }
+    }
+
+    private func animateFeedOffsetChange(
+        to targetOffset: CGFloat,
+        animation: Animation,
+        completion: @escaping () -> Void = {}
+    ) {
+        var transaction = Transaction(animation: animation)
+        transaction.addAnimationCompletion(criteria: .logicallyComplete) {
+            completion()
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-            service.requestPreviousImage(in: scope)
-            let resetTransaction = Transaction(animation: nil)
-            withTransaction(resetTransaction) {
-                feedDragOffset = 0
-                isAnimatingFeedAdvance = false
-            }
+        withTransaction(transaction) {
+            feedDragOffset = targetOffset
+        }
+    }
+
+    private func resetFeedAnimationState() {
+        let resetTransaction = Transaction(animation: nil)
+        withTransaction(resetTransaction) {
+            feedDragOffset = 0
+            isAnimatingFeedAdvance = false
         }
     }
 
@@ -826,12 +832,16 @@ private struct AutoplayVideoSurface: UIViewRepresentable {
     let assetID: UUID
     let videoURL: URL
     let previewImage: UIImage?
+    let onInteractionChanged: (Bool) -> Void
 
     func makeUIView(context: Context) -> AutoplayVideoSurfaceView {
-        AutoplayVideoSurfaceView()
+        let view = AutoplayVideoSurfaceView()
+        view.onInteractionChanged = onInteractionChanged
+        return view
     }
 
     func updateUIView(_ uiView: AutoplayVideoSurfaceView, context: Context) {
+        uiView.onInteractionChanged = onInteractionChanged
         uiView.displayVideo(
             at: videoURL,
             assetID: assetID,
@@ -840,17 +850,31 @@ private struct AutoplayVideoSurface: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: AutoplayVideoSurfaceView, coordinator: ()) {
-        uiView.prepareForReuse()
+        DispatchQueue.main.async {
+            uiView.prepareForReuse()
+        }
     }
 }
 
 private final class AutoplayVideoSurfaceView: UIView {
     private let previewImageView = UIImageView()
     private let playerLayer = AVPlayerLayer()
+    private let controlsContainer = UIView()
+    private let currentTimeLabel = UILabel()
+    private let durationLabel = UILabel()
+    private let seekSlider = UISlider()
 
     private var currentAssetID: UUID?
     private var currentVideoURL: URL?
     private var loopObserver: NSObjectProtocol?
+    private var playerTimeObserver: Any?
+    private var itemStatusObserver: NSKeyValueObservation?
+    private var itemDurationObserver: NSKeyValueObservation?
+    private var isScrubbing = false
+    private var shouldResumePlaybackAfterScrub = false
+    private var knownDurationSeconds: Double = 0
+
+    var onInteractionChanged: ((Bool) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -863,15 +887,69 @@ private final class AutoplayVideoSurfaceView: UIView {
 
         playerLayer.videoGravity = .resizeAspect
         layer.addSublayer(playerLayer)
+
+        controlsContainer.translatesAutoresizingMaskIntoConstraints = false
+        controlsContainer.backgroundColor = UIColor.black.withAlphaComponent(0.42)
+        controlsContainer.layer.cornerRadius = 18
+        controlsContainer.layer.cornerCurve = .continuous
+        controlsContainer.layer.borderWidth = 1
+        controlsContainer.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
+        addSubview(controlsContainer)
+
+        currentTimeLabel.translatesAutoresizingMaskIntoConstraints = false
+        currentTimeLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        currentTimeLabel.textColor = .white
+        currentTimeLabel.textAlignment = .left
+        currentTimeLabel.text = Self.formattedPlaybackTime(0)
+
+        durationLabel.translatesAutoresizingMaskIntoConstraints = false
+        durationLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        durationLabel.textColor = UIColor.white.withAlphaComponent(0.88)
+        durationLabel.textAlignment = .right
+        durationLabel.text = "--:--"
+
+        seekSlider.translatesAutoresizingMaskIntoConstraints = false
+        seekSlider.minimumValue = 0
+        seekSlider.maximumValue = 1
+        seekSlider.value = 0
+        seekSlider.minimumTrackTintColor = UIColor(red: 0.96, green: 0.53, blue: 0.24, alpha: 1)
+        seekSlider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.24)
+        seekSlider.isEnabled = false
+        seekSlider.addTarget(self, action: #selector(handleScrubTouchDown), for: .touchDown)
+        seekSlider.addTarget(self, action: #selector(handleScrubValueChanged(_:)), for: .valueChanged)
+        seekSlider.addTarget(self, action: #selector(handleScrubTouchEnded(_:)), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+
+        let controlsStack = UIStackView(arrangedSubviews: [currentTimeLabel, seekSlider, durationLabel])
+        controlsStack.translatesAutoresizingMaskIntoConstraints = false
+        controlsStack.axis = .horizontal
+        controlsStack.alignment = .center
+        controlsStack.spacing = 12
+        controlsContainer.addSubview(controlsStack)
+
+        currentTimeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        durationLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        currentTimeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        durationLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        NSLayoutConstraint.activate([
+            controlsContainer.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 18),
+            controlsContainer.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -18),
+            controlsContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -84),
+
+            controlsStack.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 14),
+            controlsStack.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -14),
+            controlsStack.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 12),
+            controlsStack.bottomAnchor.constraint(equalTo: controlsContainer.bottomAnchor, constant: -12),
+
+            currentTimeLabel.widthAnchor.constraint(equalToConstant: 56),
+            durationLabel.widthAnchor.constraint(equalToConstant: 56),
+            seekSlider.heightAnchor.constraint(greaterThanOrEqualToConstant: 30)
+        ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    deinit {
-        prepareForReuse()
     }
 
     override func layoutSubviews() {
@@ -892,6 +970,8 @@ private final class AutoplayVideoSurfaceView: UIView {
 
         currentAssetID = assetID
         currentVideoURL = url
+        knownDurationSeconds = 0
+        resetControls()
 
         let playerItem = AVPlayerItem(url: url)
         playerItem.preferredForwardBufferDuration = 1
@@ -901,28 +981,200 @@ private final class AutoplayVideoSurfaceView: UIView {
         player.automaticallyWaitsToMinimizeStalling = false
         playerLayer.player = player
 
+        observePlayback(for: player, item: playerItem)
+
         loopObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: playerItem,
             queue: .main
-        ) { [weak player] _ in
-            player?.seek(to: .zero)
-            player?.play()
+        ) { [weak self, weak player] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+
+                player?.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
+                    guard finished else { return }
+
+                    DispatchQueue.main.async {
+                        self.updateDisplayedCurrentTime(0)
+                        self.seekSlider.value = 0
+                        if self.isScrubbing == false {
+                            player?.playImmediately(atRate: 1)
+                        }
+                    }
+                }
+            }
         }
 
         player.playImmediately(atRate: 1)
     }
 
     func prepareForReuse() {
+        cleanupPlayback()
+        previewImageView.image = nil
+        currentAssetID = nil
+        currentVideoURL = nil
+        knownDurationSeconds = 0
+        resetControls()
+    }
+
+    private func cleanupPlayback() {
+        onInteractionChanged?(false)
+        isScrubbing = false
+        shouldResumePlaybackAfterScrub = false
+        itemStatusObserver = nil
+        itemDurationObserver = nil
+
         if let loopObserver {
             NotificationCenter.default.removeObserver(loopObserver)
             self.loopObserver = nil
         }
 
+        if let player = playerLayer.player, let playerTimeObserver {
+            player.removeTimeObserver(playerTimeObserver)
+            self.playerTimeObserver = nil
+        }
+
         playerLayer.player?.pause()
+        playerLayer.player?.replaceCurrentItem(with: nil)
         playerLayer.player = nil
-        currentAssetID = nil
-        currentVideoURL = nil
+    }
+
+    private func observePlayback(for player: AVPlayer, item: AVPlayerItem) {
+        itemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] observedItem, _ in
+            DispatchQueue.main.async {
+                self?.refreshPlaybackReadiness(for: observedItem)
+            }
+        }
+
+        itemDurationObserver = item.observe(\.duration, options: [.initial, .new]) { [weak self] observedItem, _ in
+            DispatchQueue.main.async {
+                self?.refreshKnownDuration(from: observedItem.duration)
+            }
+        }
+
+        playerTimeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.15, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self, weak player] currentTime in
+            DispatchQueue.main.async {
+                guard let self else { return }
+
+                if let duration = player?.currentItem?.duration {
+                    self.refreshKnownDuration(from: duration)
+                }
+
+                guard self.isScrubbing == false else { return }
+                self.updateDisplayedCurrentTime(currentTime.seconds)
+            }
+        }
+    }
+
+    private func refreshPlaybackReadiness(for item: AVPlayerItem) {
+        guard item.status == .readyToPlay else { return }
+        refreshKnownDuration(from: item.duration)
+    }
+
+    private func refreshKnownDuration(from duration: CMTime) {
+        let durationSeconds = duration.seconds
+        guard durationSeconds.isFinite, durationSeconds > 0 else { return }
+
+        knownDurationSeconds = durationSeconds
+        seekSlider.maximumValue = Float(durationSeconds)
+        durationLabel.text = Self.formattedPlaybackTime(durationSeconds)
+        seekSlider.isEnabled = true
+    }
+
+    private func resetControls() {
+        seekSlider.minimumValue = 0
+        seekSlider.maximumValue = 1
+        seekSlider.value = 0
+        seekSlider.isEnabled = false
+        currentTimeLabel.text = Self.formattedPlaybackTime(0)
+        durationLabel.text = "--:--"
+    }
+
+    private func updateDisplayedCurrentTime(_ seconds: Double) {
+        guard seconds.isFinite else { return }
+
+        let clampedSeconds: Double
+        if knownDurationSeconds > 0 {
+            clampedSeconds = min(max(seconds, 0), knownDurationSeconds)
+        } else {
+            clampedSeconds = max(seconds, 0)
+        }
+
+        currentTimeLabel.text = Self.formattedPlaybackTime(clampedSeconds)
+        if isScrubbing == false {
+            seekSlider.value = Float(clampedSeconds)
+        }
+    }
+
+    private func seek(to seconds: Double, shouldResumePlayback: Bool) {
+        guard let player = playerLayer.player else { return }
+
+        let clampedSeconds: Double
+        if knownDurationSeconds > 0 {
+            clampedSeconds = min(max(seconds, 0), knownDurationSeconds)
+        } else {
+            clampedSeconds = max(seconds, 0)
+        }
+
+        let targetTime = CMTime(seconds: clampedSeconds, preferredTimescale: 600)
+        let seekTolerance = CMTime(seconds: 0.15, preferredTimescale: 600)
+        player.seek(to: targetTime, toleranceBefore: seekTolerance, toleranceAfter: seekTolerance) { [weak self, weak player] finished in
+            guard finished else { return }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+
+                self.updateDisplayedCurrentTime(clampedSeconds)
+                if shouldResumePlayback {
+                    player?.playImmediately(atRate: 1)
+                }
+            }
+        }
+    }
+
+    @objc
+    private func handleScrubTouchDown() {
+        guard playerLayer.player != nil else { return }
+
+        isScrubbing = true
+        shouldResumePlaybackAfterScrub = playerLayer.player?.timeControlStatus != .paused
+        playerLayer.player?.pause()
+        onInteractionChanged?(true)
+    }
+
+    @objc
+    private func handleScrubValueChanged(_ sender: UISlider) {
+        guard isScrubbing else { return }
+        updateDisplayedCurrentTime(Double(sender.value))
+    }
+
+    @objc
+    private func handleScrubTouchEnded(_ sender: UISlider) {
+        guard isScrubbing else { return }
+
+        isScrubbing = false
+        onInteractionChanged?(false)
+        seek(to: Double(sender.value), shouldResumePlayback: shouldResumePlaybackAfterScrub)
+    }
+
+    private static func formattedPlaybackTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else {
+            return "--:--"
+        }
+
+        let totalSeconds = Int(seconds.rounded(.down))
+        let hours = totalSeconds / 3_600
+        let minutes = (totalSeconds % 3_600) / 60
+        let remainingSeconds = totalSeconds % 60
+
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, remainingSeconds)
+        }
+
+        return String(format: "%d:%02d", minutes, remainingSeconds)
     }
 }
 
@@ -1175,7 +1427,7 @@ private struct ViewerModeSwitcher: View {
             HStack(spacing: 6) {
                 ForEach(ViewerScreenMode.allCases) { mode in
                     Button {
-                        withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
+                        withAnimation(.easeInOut(duration: 0.24)) {
                             selectedMode = mode
                         }
                     } label: {
