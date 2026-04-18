@@ -380,6 +380,26 @@ struct ViewerRootView: View {
                                 assetID: assetID,
                                 videoURL: currentMediaURL,
                                 previewImage: service.currentImage,
+                                isSwipeEnabled: canSwipeFeed,
+                                onSwipeChanged: { translation in
+                                    if translation < 0 {
+                                        feedDragOffset = max(translation, -viewportHeight)
+                                    } else if canSwipeToPrevious {
+                                        feedDragOffset = min(translation, viewportHeight)
+                                    } else {
+                                        feedDragOffset = 0
+                                    }
+                                },
+                                onSwipeEnded: { translation, verticalVelocity in
+                                    handleFeedSwipeEnded(
+                                        for: scope,
+                                        translation: translation,
+                                        verticalVelocity: verticalVelocity,
+                                        viewportHeight: viewportHeight,
+                                        enabled: canSwipeFeed,
+                                        canLoadPrevious: canSwipeToPrevious
+                                    )
+                                },
                                 onInteractionChanged: { isInteracting in
                                     isInteractingWithVideoControls = isInteracting
                                 }
@@ -408,35 +428,6 @@ struct ViewerRootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            .highPriorityGesture(
-                DragGesture(minimumDistance: 12)
-                    .onChanged { value in
-                        guard canSwipeFeed else { return }
-
-                        let translation = value.translation.height
-                        if translation < 0 {
-                            feedDragOffset = max(translation, -viewportHeight)
-                        } else if canSwipeToPrevious {
-                            feedDragOffset = min(translation, viewportHeight)
-                        } else {
-                            feedDragOffset = 0
-                        }
-                    }
-                    .onEnded { value in
-                        guard canSwipeFeed else { return }
-
-                        let translation = value.translation.height
-                        let estimatedVelocity = (value.predictedEndTranslation.height - translation) / 0.12
-                        handleFeedSwipeEnded(
-                            for: scope,
-                            translation: translation,
-                            verticalVelocity: estimatedVelocity,
-                            viewportHeight: viewportHeight,
-                            enabled: canSwipeFeed,
-                            canLoadPrevious: canSwipeToPrevious
-                        )
-                    }
-            )
             .overlay {
                 if service.currentAssetID == nil && !service.isLoadingImage {
                     VStack(spacing: 18) {
@@ -832,15 +823,24 @@ private struct AutoplayVideoSurface: UIViewRepresentable {
     let assetID: UUID
     let videoURL: URL
     let previewImage: UIImage?
+    let isSwipeEnabled: Bool
+    let onSwipeChanged: (CGFloat) -> Void
+    let onSwipeEnded: (CGFloat, CGFloat) -> Void
     let onInteractionChanged: (Bool) -> Void
 
     func makeUIView(context: Context) -> AutoplayVideoSurfaceView {
         let view = AutoplayVideoSurfaceView()
+        view.isSwipeEnabled = isSwipeEnabled
+        view.onSwipeChanged = onSwipeChanged
+        view.onSwipeEnded = onSwipeEnded
         view.onInteractionChanged = onInteractionChanged
         return view
     }
 
     func updateUIView(_ uiView: AutoplayVideoSurfaceView, context: Context) {
+        uiView.isSwipeEnabled = isSwipeEnabled
+        uiView.onSwipeChanged = onSwipeChanged
+        uiView.onSwipeEnded = onSwipeEnded
         uiView.onInteractionChanged = onInteractionChanged
         uiView.displayVideo(
             at: videoURL,
@@ -856,7 +856,7 @@ private struct AutoplayVideoSurface: UIViewRepresentable {
     }
 }
 
-private final class AutoplayVideoSurfaceView: UIView {
+private final class AutoplayVideoSurfaceView: UIView, UIGestureRecognizerDelegate {
     private let previewImageView = UIImageView()
     private let playerLayer = AVPlayerLayer()
     private let controlsContainer = UIView()
@@ -873,7 +873,18 @@ private final class AutoplayVideoSurfaceView: UIView {
     private var isScrubbing = false
     private var shouldResumePlaybackAfterScrub = false
     private var knownDurationSeconds: Double = 0
+    private lazy var swipePanGestureRecognizer: UIPanGestureRecognizer = {
+        let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handleSwipePan(_:)))
+        recognizer.delegate = self
+        recognizer.cancelsTouchesInView = true
+        recognizer.minimumNumberOfTouches = 1
+        recognizer.maximumNumberOfTouches = 1
+        return recognizer
+    }()
 
+    var isSwipeEnabled = false
+    var onSwipeChanged: ((CGFloat) -> Void)?
+    var onSwipeEnded: ((CGFloat, CGFloat) -> Void)?
     var onInteractionChanged: ((Bool) -> Void)?
 
     override init(frame: CGRect) {
@@ -895,6 +906,7 @@ private final class AutoplayVideoSurfaceView: UIView {
         controlsContainer.layer.borderWidth = 1
         controlsContainer.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
         addSubview(controlsContainer)
+        addGestureRecognizer(swipePanGestureRecognizer)
 
         currentTimeLabel.translatesAutoresizingMaskIntoConstraints = false
         currentTimeLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
@@ -972,6 +984,7 @@ private final class AutoplayVideoSurfaceView: UIView {
         currentVideoURL = url
         knownDurationSeconds = 0
         resetControls()
+        updateInteractionMode()
 
         let playerItem = AVPlayerItem(url: url)
         playerItem.preferredForwardBufferDuration = 1
@@ -1015,6 +1028,7 @@ private final class AutoplayVideoSurfaceView: UIView {
         currentVideoURL = nil
         knownDurationSeconds = 0
         resetControls()
+        updateInteractionMode()
     }
 
     private func cleanupPlayback() {
@@ -1093,6 +1107,10 @@ private final class AutoplayVideoSurfaceView: UIView {
         durationLabel.text = "--:--"
     }
 
+    private func updateInteractionMode() {
+        swipePanGestureRecognizer.isEnabled = isSwipeEnabled && !isScrubbing
+    }
+
     private func updateDisplayedCurrentTime(_ seconds: Double) {
         guard seconds.isFinite else { return }
 
@@ -1143,6 +1161,7 @@ private final class AutoplayVideoSurfaceView: UIView {
         shouldResumePlaybackAfterScrub = playerLayer.player?.timeControlStatus != .paused
         playerLayer.player?.pause()
         onInteractionChanged?(true)
+        updateInteractionMode()
     }
 
     @objc
@@ -1157,7 +1176,48 @@ private final class AutoplayVideoSurfaceView: UIView {
 
         isScrubbing = false
         onInteractionChanged?(false)
+        updateInteractionMode()
         seek(to: Double(sender.value), shouldResumePlayback: shouldResumePlaybackAfterScrub)
+    }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === swipePanGestureRecognizer else {
+            return true
+        }
+
+        let location = gestureRecognizer.location(in: self)
+        guard controlsContainer.frame.insetBy(dx: -16, dy: -12).contains(location) == false else {
+            return false
+        }
+
+        let velocity = swipePanGestureRecognizer.velocity(in: self)
+        return isSwipeEnabled && abs(velocity.y) > abs(velocity.x)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard gestureRecognizer === swipePanGestureRecognizer else {
+            return true
+        }
+
+        let location = touch.location(in: self)
+        return controlsContainer.frame.insetBy(dx: -16, dy: -12).contains(location) == false
+    }
+
+    @objc
+    private func handleSwipePan(_ recognizer: UIPanGestureRecognizer) {
+        guard isSwipeEnabled else { return }
+
+        let translationY = recognizer.translation(in: self).y
+        let velocityY = recognizer.velocity(in: self).y
+
+        switch recognizer.state {
+        case .changed:
+            onSwipeChanged?(translationY)
+        case .cancelled, .ended, .failed:
+            onSwipeEnded?(translationY, velocityY)
+        default:
+            break
+        }
     }
 
     private static func formattedPlaybackTime(_ seconds: Double) -> String {
@@ -1305,12 +1365,21 @@ private final class ZoomableImageSurfaceView: UIView, UIGestureRecognizerDelegat
         }
 
         centerImageIfNeeded()
-        scrollView.contentOffset = clampedContentOffset(scrollView.contentOffset)
         if shouldResetZoom {
+            scrollView.contentOffset = centeredContentOffset()
             needsZoomReset = false
+        } else {
+            scrollView.contentOffset = clampedContentOffset(scrollView.contentOffset)
         }
 
         updateInteractionMode()
+    }
+
+    private func centeredContentOffset() -> CGPoint {
+        CGPoint(
+            x: -scrollView.contentInset.left,
+            y: -scrollView.contentInset.top
+        )
     }
 
     private func clampedContentOffset(_ proposedOffset: CGPoint) -> CGPoint {
