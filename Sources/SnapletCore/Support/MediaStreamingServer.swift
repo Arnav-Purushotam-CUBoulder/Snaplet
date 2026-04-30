@@ -66,7 +66,7 @@ public final class MediaStreamingServer: @unchecked Sendable {
         }
     }
 
-    public func registerVideo(at fileURL: URL, byteSize: Int64) -> URL? {
+    public func registerResource(at fileURL: URL, byteSize: Int64) -> URL? {
         stateQueue.sync {
             pruneRegisteredResourcesLocked()
 
@@ -83,6 +83,10 @@ public final class MediaStreamingServer: @unchecked Sendable {
             )
             return baseURL.appendingPathComponent(token, isDirectory: false)
         }
+    }
+
+    public func registerVideo(at fileURL: URL, byteSize: Int64) -> URL? {
+        registerResource(at: fileURL, byteSize: byteSize)
     }
 
     private func handleListenerStateUpdate(_ state: NWListener.State, listener: NWListener) {

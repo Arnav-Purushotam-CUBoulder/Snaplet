@@ -42,11 +42,39 @@ private struct ViewerFrame {
 private typealias PendingTransfer = (descriptor: ResourceDescriptor, purpose: ImageRequestPurpose, scope: ImageSelectionScope)
 
 public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sendable {
+    private struct PersistedViewerFrame: Codable {
+        let assetID: UUID
+        let mediaType: MediaType
+        let relativeFilePath: String
+        let filename: String
+        let byteSize: Int64
+        let estimatedMemoryCost: Int64
+        let isFavorite: Bool
+        let scope: ImageSelectionScope
+    }
+
+    private struct PersistedViewerState: Codable {
+        let version: Int
+        let activeSelectionScope: ImageSelectionScope
+        let currentFrame: PersistedViewerFrame?
+        let previousFrames: [PersistedViewerFrame]
+        let forwardFrames: [PersistedViewerFrame]
+        let prefetchedFrames: [PersistedViewerFrame]
+    }
+
     private struct NavigationPresentationSnapshot {
         let previousFrame: ViewerFrame?
         let nextFrame: ViewerFrame?
         let queueCount: Int
+        let queueTargetCount: Int
         let anyPrefetchInFlight: Bool
+    }
+
+    private struct PhotoQueuePresentationSnapshot {
+        let photoCount: Int
+        let photoTargetCount: Int
+        let favoritePhotoCount: Int
+        let favoritePhotoTargetCount: Int
     }
 
     private enum FrameActivationSource {
@@ -69,6 +97,15 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     @Published public private(set) var connectionStatus = "Searching for your Mac…"
     @Published public private(set) var hostName: String?
     @Published public private(set) var libraryCount = 0
+    @Published public private(set) var libraryPhotoCount = 0
+    @Published public private(set) var libraryVideoCount = 0
+    @Published public private(set) var libraryFavoritePhotoCount = 0
+    @Published public private(set) var libraryFavoriteVideoCount = 0
+    @Published public private(set) var viewedSinceLastOpenCount = 0
+    @Published public private(set) var viewedTodayCount = 0
+    @Published public private(set) var viewedTodayPhotoCount = 0
+    @Published public private(set) var viewedTodayVideoCount = 0
+    @Published public private(set) var timeSpentTodaySeconds: TimeInterval = 0
     @Published public private(set) var previousImage: SnapletPlatformImage?
     @Published public private(set) var currentImageURL: URL?
     @Published public private(set) var currentFilename: String?
@@ -77,23 +114,39 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     @Published public private(set) var currentMediaType: MediaType?
     @Published public private(set) var currentImageIsFavorite = false
     @Published public private(set) var nextImage: SnapletPlatformImage?
+    @Published public private(set) var hasPreviousFrame = false
+    @Published public private(set) var hasNextFrame = false
+    @Published public private(set) var videoCatalogItems: [VideoCatalogItem] = []
+    @Published public private(set) var videoCatalogSort: VideoCatalogSort = .newest
+    @Published public private(set) var isLoadingVideoCatalog = false
     @Published public private(set) var isLoadingImage = false
     @Published public private(set) var isPrefetching = false
     @Published public private(set) var isUploadingImages = false
+    @Published public private(set) var isUpdatingVideoThumbnail = false
     @Published public private(set) var isUpdatingFavorite = false
     @Published public private(set) var isDeletingImage = false
+    @Published public private(set) var isDeletingVideoCatalogItems = false
     @Published public private(set) var activeSelectionScope: ImageSelectionScope = .all
+    @Published public private(set) var prefetchQueueCount = 0
+    @Published public private(set) var prefetchQueueTargetCount = 0
+    @Published public private(set) var photoPrefetchQueueCount = 0
+    @Published public private(set) var photoPrefetchQueueTargetCount = 0
+    @Published public private(set) var favoritePhotoPrefetchQueueCount = 0
+    @Published public private(set) var favoritePhotoPrefetchQueueTargetCount = 0
     @Published public private(set) var uploadStatusMessage: String?
     @Published public private(set) var errorMessage: String?
 
     private let cacheDirectory: URL
     private let uploadStagingDirectory: URL
+    private let persistedStateURL: URL
     private let displayScale: CGFloat
+    private let previewImageMaximumPixelSize: Int
     private let peerID: MCPeerID
     private var session: MCSession
     private var browser: MCNearbyServiceBrowser
     private let stateQueue = DispatchQueue(label: "snaplet.viewer.state")
     private let workQueue = DispatchQueue(label: "snaplet.viewer.service", qos: .userInteractive, attributes: .concurrent)
+    private let persistenceQueue = DispatchQueue(label: "snaplet.viewer.persistence")
     private let displayDecodeQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "snaplet.viewer.decode.display"
@@ -105,14 +158,15 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         let queue = OperationQueue()
         queue.name = "snaplet.viewer.decode.prefetch"
         queue.qualityOfService = .utility
-        queue.maxConcurrentOperationCount = 2
+        queue.maxConcurrentOperationCount = 3
         return queue
     }()
     private let debugAutoUploadPayloads: [ImageUploadPayload]
     private let historyDepth = 5
-    private let prefetchTargetDepth = 8
-    private let maxConcurrentPrefetchRequests = 4
-    private let prefetchedFrameMemoryBudget: Int64 = 320 * 1024 * 1024
+    private let photoPrefetchTargetDepth = 100
+    private let favoritePhotoPrefetchTargetDepth = 50
+    private let maxConcurrentPrefetchRequests = 3
+    private let prefetchedFrameMemoryBudget: Int64 = 3 * 1024 * 1024 * 1024
     private let defaultPrefetchedFrameMemoryCost: Int64 = 24 * 1024 * 1024
     private let deleteRequestTimeout: TimeInterval = 8
     private var invitedPeerIDs: Set<String> = []
@@ -127,15 +181,30 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private var outstandingUploadCount = 0
     private var displayRequestInFlight = false
     private var prefetchRequestsInFlight: [ImageSelectionScope: Int] = [:]
+    private var isFeedPrefetchingEnabled = false
     private var hasScheduledDebugAutoUpload = false
     private var isStarted = false
     private var currentSessionState: MCSessionState = .notConnected
     private var activeSelectionScopeState: ImageSelectionScope = .all
+    private var recoveryWorkItem: DispatchWorkItem?
+    private var lastConnectedAt: Date?
+    private var viewerStatePersistenceScheduled = false
+    private var hasRestoredPersistedState = false
+    private var appUsageTimer: DispatchSourceTimer?
+    private var appUsageCheckpointDate: Date?
 
+    @MainActor
     public init(cacheDirectory: URL, displayName: String? = nil, displayScale: CGFloat = 1) {
         self.cacheDirectory = cacheDirectory
         self.uploadStagingDirectory = cacheDirectory.appending(path: "Uploads", directoryHint: .isDirectory)
+        self.persistedStateURL = cacheDirectory.appending(path: "viewer-state.json")
         self.displayScale = max(displayScale, 1)
+        #if os(iOS)
+        let longestEdgeInPoints = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
+        self.previewImageMaximumPixelSize = max(Int(ceil(longestEdgeInPoints * self.displayScale)), 1)
+        #else
+        self.previewImageMaximumPixelSize = 1
+        #endif
         self.peerID = MCPeerID(displayName: displayName ?? Self.defaultDisplayName())
         self.session = Self.makeSession(for: peerID)
         self.browser = Self.makeBrowser(for: peerID)
@@ -145,6 +214,11 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
         try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: uploadStagingDirectory, withIntermediateDirectories: true)
+        let viewedTodayCounts = Self.storedViewedTodayCounts()
+        self.viewedTodayPhotoCount = viewedTodayCounts.photoCount
+        self.viewedTodayVideoCount = viewedTodayCounts.videoCount
+        self.viewedTodayCount = viewedTodayCounts.totalCount
+        self.timeSpentTodaySeconds = Self.storedTimeSpentTodaySeconds()
 
         session.delegate = self
         browser.delegate = self
@@ -154,30 +228,27 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         stateQueue.sync {
             isStarted = true
         }
+        startAppUsageTracking()
+        restorePersistedStateIfNeeded()
         beginBrowsing()
-        updatePublishedState {
-            $0.connectionStatus = "Searching for your Mac…"
-        }
+        publishViewerStateSnapshot(connectionStatus: "Searching for your Mac…")
     }
 
     public func stop() {
         stateQueue.sync {
             isStarted = false
             currentSessionState = .notConnected
+            recoveryWorkItem?.cancel()
+            recoveryWorkItem = nil
         }
+        stopAppUsageTracking()
         displayDecodeQueue.cancelAllOperations()
         prefetchDecodeQueue.cancelAllOperations()
         browser.stopBrowsingForPeers()
         session.disconnect()
-        resetTransientState()
-        updatePublishedState {
-            $0.connectionStatus = "Stopped"
-            $0.hostName = nil
-            $0.isLoadingImage = false
-            $0.isPrefetching = false
-            $0.isUpdatingFavorite = false
-            $0.isDeletingImage = false
-        }
+        resetTransientState(preservingCachedFrames: true)
+        persistViewerStateNow()
+        publishViewerStateSnapshot(connectionStatus: "Stopped", hostName: nil, updateHostName: true)
     }
 
     public func requestNextImage(in scope: ImageSelectionScope? = nil) {
@@ -186,13 +257,13 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
         if let forwardFrame = takeForwardFrame(matching: targetScope) {
             promoteHistoryFrame(forwardFrame, source: .forwardHistory)
-            maintainPrefetchPipeline(for: targetScope)
+            maintainParallelPhotoPrefetchPipelines(prioritizing: targetScope)
             return
         }
 
         if let prefetchedFrame = takePrefetchedFrame(matching: targetScope) {
             promotePrefetchedFrame(prefetchedFrame)
-            maintainPrefetchPipeline(for: targetScope)
+            maintainParallelPhotoPrefetchPipelines(prioritizing: targetScope)
             return
         }
 
@@ -215,14 +286,80 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         promoteHistoryFrame(previousFrame, source: .backwardHistory)
     }
 
+    public func requestVideoCatalog(scope: ImageSelectionScope, sort: VideoCatalogSort) {
+        let catalogScope: ImageSelectionScope = scope.favoritesOnly ? .favoriteVideos : .videos
+        guard !session.connectedPeers.isEmpty else {
+            updatePublishedState {
+                $0.errorMessage = "Connect to the Mac host before loading videos."
+                $0.isLoadingVideoCatalog = false
+            }
+            return
+        }
+
+        updatePublishedState {
+            $0.isLoadingVideoCatalog = true
+            $0.videoCatalogSort = sort
+            $0.errorMessage = nil
+        }
+
+        workQueue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                try self.session.send(
+                    PeerMessage.requestVideoCatalog(scope: catalogScope, sort: sort).encoded(),
+                    toPeers: self.session.connectedPeers,
+                    with: .reliable
+                )
+            } catch {
+                self.updatePublishedState {
+                    $0.isLoadingVideoCatalog = false
+                    $0.errorMessage = "Video catalog request failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    public func requestVideo(assetID: UUID, in scope: ImageSelectionScope) {
+        let targetScope: ImageSelectionScope = scope.favoritesOnly ? .favoriteVideos : .videos
+        synchronizeCurrentFrameStateIfNeeded()
+
+        guard !session.connectedPeers.isEmpty else {
+            updatePublishedState {
+                $0.errorMessage = "The Mac host is not connected yet."
+                $0.connectionStatus = "Still searching for your Mac…"
+            }
+            return
+        }
+
+        guard reserveRequestSlot(for: .displayNow, scope: targetScope) else { return }
+
+        do {
+            try session.send(
+                PeerMessage.requestAsset(assetID: assetID, purpose: .displayNow, scope: targetScope).encoded(),
+                toPeers: session.connectedPeers,
+                with: .reliable
+            )
+
+            updatePublishedState {
+                $0.isLoadingImage = true
+                $0.errorMessage = nil
+            }
+        } catch {
+            clearRequestFlag(for: .displayNow, scope: targetScope)
+            updatePublishedState {
+                $0.isLoadingImage = false
+                $0.errorMessage = "Video request failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     public func setSelectionScope(_ scope: ImageSelectionScope) {
         synchronizeCurrentFrameStateIfNeeded()
-        prefetchDecodeQueue.cancelAllOperations()
         let previousScope = currentSelectionScope()
         let canReuseCurrentImage = currentMediaType == scope.mediaType
             && (!scope.favoritesOnly || currentImageIsFavorite)
         let hadCurrentImage = currentAssetID != nil
-        let removedPrefetchedURLs = discardPrefetchedFramesIfScopeDiffers(from: scope)
         let removedHistoryURLs = discardNavigationHistory()
         let removedCurrentURL = hadCurrentImage && !canReuseCurrentImage ? clearCurrentFrameState() : nil
 
@@ -246,32 +383,50 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 $0.currentImage = nil
                 $0.currentImageURL = nil
                 $0.currentFilename = nil
-                $0.currentAssetID = nil
-                $0.currentMediaType = nil
-                $0.currentImageIsFavorite = false
-                $0.isLoadingImage = false
+            $0.currentAssetID = nil
+            $0.currentMediaType = nil
+            $0.currentImageIsFavorite = false
+            $0.hasPreviousFrame = false
+            $0.hasNextFrame = false
+            $0.isLoadingImage = false
             }
         }
 
-        for removedPrefetchedURL in removedPrefetchedURLs {
-            removeCachedMediaIfNeeded(at: removedPrefetchedURL)
-        }
         for removedHistoryURL in removedHistoryURLs {
             removeCachedMediaIfNeeded(at: removedHistoryURL)
         }
         if let removedCurrentURL {
             removeCachedMediaIfNeeded(at: removedCurrentURL)
         }
+        scheduleViewerStatePersistence()
 
         let shouldLoadImmediately = previousScope != scope
             ? (!hadCurrentImage || !canReuseCurrentImage)
             : currentAssetID == nil && !isLoadingImage
 
-        if shouldLoadImmediately {
+        if shouldLoadImmediately && scope.mediaType == .photo {
             requestNextImage(in: scope)
         } else {
-            maintainPrefetchPipeline(for: scope)
+            maintainParallelPhotoPrefetchPipelines(prioritizing: scope)
         }
+    }
+
+    public func setFeedPrefetchingEnabled(_ enabled: Bool) {
+        let didChange = stateQueue.sync { () -> Bool in
+            guard isFeedPrefetchingEnabled != enabled else { return false }
+            isFeedPrefetchingEnabled = enabled
+            return true
+        }
+
+        guard didChange else { return }
+
+        if enabled == false {
+            prefetchDecodeQueue.cancelAllOperations()
+            publishNavigationState()
+            return
+        }
+
+        maintainParallelPhotoPrefetchPipelines(prioritizing: currentSelectionScope())
     }
 
     public func toggleFavorite() {
@@ -341,7 +496,48 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
+    public func deleteVideoCatalogItems(assetIDs: [UUID]) {
+        let uniqueAssetIDs = Array(Set(assetIDs))
+        guard !uniqueAssetIDs.isEmpty else { return }
+        guard !session.connectedPeers.isEmpty else {
+            updatePublishedState {
+                $0.errorMessage = "Connect to the Mac host before deleting videos."
+                $0.isDeletingVideoCatalogItems = false
+            }
+            return
+        }
+
+        updatePublishedState {
+            $0.isDeletingVideoCatalogItems = true
+            $0.errorMessage = nil
+        }
+
+        workQueue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                for assetID in uniqueAssetIDs {
+                    try self.session.send(
+                        PeerMessage.deleteAsset(assetID: assetID).encoded(),
+                        toPeers: self.session.connectedPeers,
+                        with: .reliable
+                    )
+                }
+
+                self.updatePublishedState {
+                    $0.isDeletingVideoCatalogItems = false
+                }
+            } catch {
+                self.updatePublishedState {
+                    $0.isDeletingVideoCatalogItems = false
+                    $0.errorMessage = "Video delete failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     public func restartDiscovery() {
+        cancelScheduledRecovery()
         rebuildTransportStack(disconnectCurrentSession: true)
         beginBrowsing()
         updatePublishedState {
@@ -372,6 +568,73 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         for payload in payloads {
             workQueue.async { [weak self] in
                 self?.stageAndUpload(payload, to: hostPeer)
+            }
+        }
+    }
+
+    public func uploadVideoThumbnail(assetID: UUID, payload: ImageUploadPayload) {
+        guard let hostPeer = session.connectedPeers.first else {
+            updatePublishedState {
+                $0.errorMessage = "Connect to the Mac host before updating thumbnails."
+                $0.isUpdatingVideoThumbnail = false
+            }
+            return
+        }
+
+        updatePublishedState {
+            $0.isUpdatingVideoThumbnail = true
+            $0.uploadStatusMessage = "Uploading video thumbnail…"
+            $0.errorMessage = nil
+        }
+
+        workQueue.async { [weak self] in
+            guard let self else { return }
+
+            let safeFilename = payload.filename.replacingOccurrences(of: "/", with: "-")
+            let resourceName = "thumbnail-\(assetID.uuidString)-\(UUID().uuidString)-\(safeFilename)"
+            let fileURL = self.uploadStagingDirectory.appending(path: resourceName)
+
+            do {
+                defer {
+                    if payload.shouldDeleteTemporaryFileAfterStaging {
+                        try? FileManager.default.removeItem(at: payload.temporaryFileURL)
+                    }
+                }
+
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    try FileManager.default.removeItem(at: fileURL)
+                }
+                try FileManager.default.copyItem(at: payload.temporaryFileURL, to: fileURL)
+
+                try self.session.send(
+                    PeerMessage.setVideoThumbnail(assetID: assetID, resourceName: resourceName).encoded(),
+                    toPeers: [hostPeer],
+                    with: .reliable
+                )
+
+                self.session.sendResource(at: fileURL, withName: resourceName, toPeer: hostPeer) { [weak self] error in
+                    try? FileManager.default.removeItem(at: fileURL)
+                    guard let self else { return }
+
+                    if let error {
+                        self.updatePublishedState {
+                            $0.isUpdatingVideoThumbnail = false
+                            $0.uploadStatusMessage = nil
+                            $0.errorMessage = "Thumbnail upload failed: \(error.localizedDescription)"
+                        }
+                    } else {
+                        self.updatePublishedState {
+                            $0.uploadStatusMessage = "Thumbnail sent. Waiting for your Mac to save it…"
+                        }
+                    }
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: fileURL)
+                self.updatePublishedState {
+                    $0.isUpdatingVideoThumbnail = false
+                    $0.uploadStatusMessage = nil
+                    $0.errorMessage = "Failed to prepare thumbnail: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -408,8 +671,12 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
-    private func maintainPrefetchPipeline(for scope: ImageSelectionScope? = nil) {
+    private func maintainPrefetchPipeline(
+        for scope: ImageSelectionScope? = nil,
+        allowInactiveScope: Bool = false
+    ) {
         let targetScope = scope ?? currentSelectionScope()
+        guard allowInactiveScope || targetScope == currentSelectionScope() else { return }
         guard !session.connectedPeers.isEmpty else { return }
         let requestBatchSize = nextPrefetchRequestBatchSize(for: targetScope)
         guard requestBatchSize > 0 else { return }
@@ -419,8 +686,27 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
+    private func maintainParallelPhotoPrefetchPipelines(prioritizing primaryScope: ImageSelectionScope? = nil) {
+        let prioritizedScopes = prioritizedParallelPhotoScopes(primaryScope ?? currentSelectionScope())
+        for scope in prioritizedScopes {
+            maintainPrefetchPipeline(for: scope, allowInactiveScope: true)
+        }
+    }
+
+    private func prioritizedParallelPhotoScopes(_ primaryScope: ImageSelectionScope) -> [ImageSelectionScope] {
+        switch primaryScope {
+        case .favorites:
+            [.favorites, .all]
+        case .all:
+            [.all, .favorites]
+        case .videos, .favoriteVideos:
+            [.all, .favorites]
+        }
+    }
+
     private func promotePrefetchedFrame(_ frame: ViewerFrame) {
         let activation = activateFrameInState(frame, source: .freshContent)
+        recordViewedMedia(mediaType: frame.mediaType)
 
         updatePublishedState {
             $0.previousImage = activation.snapshot.previousFrame?.image
@@ -431,14 +717,21 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             $0.currentMediaType = frame.mediaType
             $0.currentImageIsFavorite = frame.isFavorite
             $0.nextImage = activation.snapshot.nextFrame?.image
+            $0.hasPreviousFrame = activation.snapshot.previousFrame != nil
+            $0.hasNextFrame = activation.snapshot.nextFrame != nil
             $0.isLoadingImage = false
             $0.errorMessage = nil
             $0.isPrefetching = activation.snapshot.anyPrefetchInFlight
+            $0.prefetchQueueCount = activation.snapshot.queueCount
+            $0.prefetchQueueTargetCount = activation.snapshot.queueTargetCount
         }
 
         for staleURL in activation.staleURLs where staleURL != frame.fileURL {
             removeCachedMediaIfNeeded(at: staleURL)
         }
+
+        scheduleViewerStatePersistence()
+        publishPhotoPrefetchQueueStates()
     }
 
     private func stageAndUpload(_ payload: ImageUploadPayload, to hostPeer: MCPeerID) {
@@ -510,8 +803,19 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private func handleMessage(_ message: PeerMessage) {
         switch message.kind {
         case .libraryStatus:
+            if let summary = message.librarySummary {
+                updatePublishedLibrarySummary(summary)
+                return
+            }
             updatePublishedState {
                 $0.libraryCount = message.libraryCount ?? 0
+            }
+        case .videoCatalog:
+            updatePublishedState {
+                $0.videoCatalogItems = message.videoCatalogItems ?? []
+                $0.videoCatalogSort = message.videoCatalogSort ?? $0.videoCatalogSort
+                $0.isLoadingVideoCatalog = false
+                $0.errorMessage = nil
             }
         case .transferReady:
             guard let resource = message.resource else { return }
@@ -563,25 +867,44 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                     self?.requestNextImage()
                 }
             }
+            if resource.mediaType == .video {
+                requestVideoCatalog(scope: currentSelectionScope(), sort: videoCatalogSort)
+            }
         case .favoriteStatusUpdated:
             guard let assetID = message.assetID, let favoriteValue = message.favoriteValue else { return }
+            updateVideoCatalogFavorite(assetID: assetID, isFavorite: favoriteValue)
             handleFavoriteStatusUpdate(assetID: assetID, isFavorite: favoriteValue)
         case .assetDeleted:
             guard let assetID = message.assetID else { return }
+            removeVideoCatalogItem(assetID: assetID)
             handleDeletedAsset(assetID: assetID, libraryCount: message.libraryCount)
+        case .videoThumbnailUpdated:
+            guard message.assetID != nil else { return }
+            let activeScope = currentSelectionScope()
+            updatePublishedState {
+                $0.isUpdatingVideoThumbnail = false
+                $0.uploadStatusMessage = "Video thumbnail updated."
+                $0.errorMessage = nil
+            }
+            if activeScope.mediaType == .video {
+                requestVideoCatalog(scope: activeScope, sort: videoCatalogSort)
+            }
         case .failure:
             clearPendingDeleteRequest()
             resetDisplayRequestFlag()
             clearAllPrefetchRequestFlags()
             updatePublishedState {
                 $0.isLoadingImage = false
+                $0.isLoadingVideoCatalog = false
+                $0.isUpdatingVideoThumbnail = false
                 $0.isUpdatingFavorite = false
                 $0.isDeletingImage = false
+                $0.isDeletingVideoCatalogItems = false
                 $0.errorMessage = message.errorMessage
                 $0.connectionStatus = "Request failed"
             }
             publishNavigationState()
-        case .requestRandomImage, .setFavorite, .deleteAsset:
+        case .requestRandomImage, .requestAsset, .requestVideoCatalog, .setFavorite, .deleteAsset, .setVideoThumbnail:
             break
         }
     }
@@ -678,18 +1001,29 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             )
 
             let activeScope = self.currentSelectionScope()
-            guard frame.scope == activeScope else {
-                self.clearRequestFlag(for: pendingTransfer.purpose, scope: pendingTransfer.scope)
-                self.publishNavigationState()
-                self.removeCachedMediaIfNeeded(at: fileURL)
-                return
-            }
-
             switch pendingTransfer.purpose {
             case .displayNow:
+                guard frame.scope == activeScope else {
+                    self.clearRequestFlag(for: .displayNow, scope: pendingTransfer.scope)
+                    if self.shouldAcceptPrefetchedFrame(in: frame.scope) {
+                        self.storePrefetchedFrame(frame)
+                    } else {
+                        self.publishNavigationState()
+                        self.removeCachedMediaIfNeeded(at: fileURL)
+                    }
+                    return
+                }
+
                 self.promoteDecodedFrame(frame)
-                self.maintainPrefetchPipeline(for: frame.scope)
+                self.maintainParallelPhotoPrefetchPipelines(prioritizing: frame.scope)
             case .prefetch:
+                guard self.shouldAcceptPrefetchedFrame(in: frame.scope) else {
+                    self.clearRequestFlag(for: .prefetch, scope: pendingTransfer.scope)
+                    self.publishNavigationState()
+                    self.removeCachedMediaIfNeeded(at: fileURL)
+                    return
+                }
+
                 self.storePrefetchedFrame(frame)
             }
         }
@@ -709,16 +1043,23 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         )
 
         let activeScope = currentSelectionScope()
-        guard frame.scope == activeScope else {
-            clearRequestFlag(for: pendingTransfer.purpose, scope: pendingTransfer.scope)
-            publishNavigationState()
-            return
-        }
-
         switch pendingTransfer.purpose {
         case .displayNow:
+            guard frame.scope == activeScope else {
+                clearRequestFlag(for: .displayNow, scope: pendingTransfer.scope)
+                publishNavigationState()
+                return
+            }
+
             promoteDecodedFrame(frame)
+            maintainParallelPhotoPrefetchPipelines(prioritizing: frame.scope)
         case .prefetch:
+            guard shouldAcceptPrefetchedFrame(in: frame.scope) else {
+                clearRequestFlag(for: .prefetch, scope: pendingTransfer.scope)
+                publishNavigationState()
+                return
+            }
+
             storePrefetchedFrame(frame)
         }
     }
@@ -726,6 +1067,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private func promoteDecodedFrame(_ frame: ViewerFrame) {
         clearRequestFlag(for: .displayNow, scope: frame.scope)
         let activation = activateFrameInState(frame, source: .freshContent)
+        recordViewedMedia(mediaType: frame.mediaType)
 
         updatePublishedState {
             $0.previousImage = activation.snapshot.previousFrame?.image
@@ -736,14 +1078,21 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             $0.currentMediaType = frame.mediaType
             $0.currentImageIsFavorite = frame.isFavorite
             $0.nextImage = activation.snapshot.nextFrame?.image
+            $0.hasPreviousFrame = activation.snapshot.previousFrame != nil
+            $0.hasNextFrame = activation.snapshot.nextFrame != nil
             $0.isLoadingImage = false
             $0.isPrefetching = activation.snapshot.anyPrefetchInFlight
+            $0.prefetchQueueCount = activation.snapshot.queueCount
+            $0.prefetchQueueTargetCount = activation.snapshot.queueTargetCount
             $0.errorMessage = nil
         }
 
         for staleURL in activation.staleURLs where staleURL != frame.fileURL {
             removeCachedMediaIfNeeded(at: staleURL)
         }
+
+        scheduleViewerStatePersistence()
+        publishPhotoPrefetchQueueStates()
     }
 
     private func storePrefetchedFrame(_ frame: ViewerFrame) {
@@ -753,14 +1102,20 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         updatePublishedState {
             $0.previousImage = navigationSnapshot.previousFrame?.image
             $0.nextImage = navigationSnapshot.nextFrame?.image
+            $0.hasPreviousFrame = navigationSnapshot.previousFrame != nil
+            $0.hasNextFrame = navigationSnapshot.nextFrame != nil
             $0.isPrefetching = navigationSnapshot.anyPrefetchInFlight
+            $0.prefetchQueueCount = navigationSnapshot.queueCount
+            $0.prefetchQueueTargetCount = navigationSnapshot.queueTargetCount
         }
 
         for previousPrefetchedURL in removedPrefetchedURLs where previousPrefetchedURL != frame.fileURL {
             removeCachedMediaIfNeeded(at: previousPrefetchedURL)
         }
 
-        maintainPrefetchPipeline(for: frame.scope)
+        scheduleViewerStatePersistence()
+        publishPhotoPrefetchQueueStates()
+        maintainParallelPhotoPrefetchPipelines(prioritizing: frame.scope)
     }
 
     private func updatePublishedState(_ update: @Sendable @escaping (PeerViewerService) -> Void) {
@@ -814,6 +1169,12 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     private func clearAllPrefetchRequestFlags() {
         stateQueue.sync {
             prefetchRequestsInFlight.removeAll()
+        }
+    }
+
+    private func shouldAcceptPrefetchedFrame(in scope: ImageSelectionScope) -> Bool {
+        stateQueue.sync {
+            isFeedPrefetchingEnabled && effectivePrefetchTargetDepthLocked(for: scope) > 0
         }
     }
 
@@ -883,6 +1244,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
     private func nextPrefetchRequestBatchSize(for scope: ImageSelectionScope) -> Int {
         stateQueue.sync {
+            guard isFeedPrefetchingEnabled else { return 0 }
             let queuedCount = prefetchedFrames.filter { $0.scope == scope }.count
             let inFlightCount = prefetchRequestsInFlight[scope, default: 0]
             let effectiveTargetDepth = effectivePrefetchTargetDepthLocked(for: scope)
@@ -946,7 +1308,83 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
         let exemplarMemoryCost = max(approximatePrefetchedFrameMemoryCostLocked(for: scope), 1)
         let memoryBoundTarget = max(Int(prefetchedFrameMemoryBudget / exemplarMemoryCost), 1)
-        return min(prefetchTargetDepth, memoryBoundTarget)
+        let configuredTarget = scope.favoritesOnly ? favoritePhotoPrefetchTargetDepth : photoPrefetchTargetDepth
+        return min(configuredTarget, memoryBoundTarget)
+    }
+
+    private func updatePublishedLibrarySummary(_ summary: LibrarySummary) {
+        updatePublishedState {
+            $0.libraryCount = summary.assetCount
+            $0.libraryPhotoCount = summary.photoCount
+            $0.libraryVideoCount = summary.videoCount
+            $0.libraryFavoritePhotoCount = summary.favoritePhotoCount
+            $0.libraryFavoriteVideoCount = summary.favoriteVideoCount
+        }
+    }
+
+    private func recordViewedMedia(mediaType: MediaType) {
+        let todayCounts = Self.incrementStoredViewedTodayCount(for: mediaType)
+        updatePublishedState {
+            $0.viewedSinceLastOpenCount += 1
+            $0.viewedTodayPhotoCount = todayCounts.photoCount
+            $0.viewedTodayVideoCount = todayCounts.videoCount
+            $0.viewedTodayCount = todayCounts.totalCount
+        }
+    }
+
+    private func startAppUsageTracking() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: 30)
+        timer.setEventHandler { [weak self] in
+            self?.checkpointAppUsageTracking(ending: false)
+        }
+
+        let previousTimer = stateQueue.sync { () -> DispatchSourceTimer? in
+            let previousTimer = appUsageTimer
+            appUsageTimer = timer
+            appUsageCheckpointDate = Date()
+            return previousTimer
+        }
+        previousTimer?.setEventHandler {}
+        previousTimer?.cancel()
+
+        timer.resume()
+        checkpointAppUsageTracking(ending: false)
+    }
+
+    private func stopAppUsageTracking() {
+        let timer = stateQueue.sync { () -> DispatchSourceTimer? in
+            let timer = appUsageTimer
+            appUsageTimer = nil
+            return timer
+        }
+        timer?.setEventHandler {}
+        timer?.cancel()
+        checkpointAppUsageTracking(ending: true)
+    }
+
+    private func checkpointAppUsageTracking(ending: Bool) {
+        let now = Date()
+        let elapsedSeconds = stateQueue.sync { () -> TimeInterval in
+            guard let checkpointDate = appUsageCheckpointDate else {
+                if ending == false {
+                    appUsageCheckpointDate = now
+                }
+                return 0
+            }
+
+            if ending {
+                appUsageCheckpointDate = nil
+            } else {
+                appUsageCheckpointDate = now
+            }
+            return max(now.timeIntervalSince(checkpointDate), 0)
+        }
+
+        let totalSeconds = Self.addStoredTimeSpentTodaySeconds(elapsedSeconds)
+        updatePublishedState {
+            $0.timeSpentTodaySeconds = totalSeconds
+        }
     }
 
     private func addOutstandingUploads(_ count: Int) {
@@ -984,6 +1422,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
     }
 
     private func rebuildTransportStack(disconnectCurrentSession: Bool) {
+        cancelScheduledRecovery()
         let oldBrowser = browser
         let oldSession = session
 
@@ -995,7 +1434,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
         oldSession.delegate = nil
 
-        resetTransientState()
+        resetTransientState(preservingCachedFrames: true)
 
         stateQueue.sync {
             currentSessionState = .notConnected
@@ -1009,18 +1448,67 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         browser = newBrowser
     }
 
-    private func scheduleRecovery(afterDisconnecting session: MCSession) {
-        let shouldRecover = stateQueue.sync {
-            isStarted
+    private func cancelScheduledRecovery() {
+        stateQueue.sync {
+            recoveryWorkItem?.cancel()
+            recoveryWorkItem = nil
         }
-        guard shouldRecover else { return }
+    }
 
-        workQueue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let self else { return }
-            guard session === self.session else { return }
-            self.rebuildTransportStack(disconnectCurrentSession: false)
-            self.beginBrowsing()
+    private func noteSuccessfulConnection() {
+        stateQueue.sync {
+            lastConnectedAt = Date()
+            recoveryWorkItem?.cancel()
+            recoveryWorkItem = nil
         }
+    }
+
+    private func recoveryDelayLocked(now: Date) -> TimeInterval {
+        guard let lastConnectedAt else {
+            return 0.8
+        }
+
+        let elapsedSinceLastConnection = now.timeIntervalSince(lastConnectedAt)
+        if elapsedSinceLastConnection < 3 {
+            return 1.8
+        }
+
+        if elapsedSinceLastConnection < 10 {
+            return 1.2
+        }
+
+        return 0.8
+    }
+
+    private func scheduleRecovery(afterDisconnecting session: MCSession) {
+        let recoveryWorkItem = stateQueue.sync { () -> DispatchWorkItem? in
+            guard isStarted else { return nil }
+
+            self.recoveryWorkItem?.cancel()
+
+            let delay = self.recoveryDelayLocked(now: Date())
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                guard session === self.session else { return }
+
+                let shouldRecover = self.stateQueue.sync {
+                    self.isStarted && self.currentSessionState == .notConnected
+                }
+                guard shouldRecover else { return }
+
+                self.rebuildTransportStack(disconnectCurrentSession: false)
+                self.beginBrowsing()
+                self.updatePublishedState {
+                    $0.connectionStatus = "Reconnecting to your Mac…"
+                }
+            }
+
+            self.recoveryWorkItem = workItem
+            self.workQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+            return workItem
+        }
+
+        guard recoveryWorkItem != nil else { return }
     }
 
     private func updateSessionState(_ state: MCSessionState) {
@@ -1199,16 +1687,97 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             previousFrame: previousFrame,
             nextFrame: forwardFrame ?? activePrefetchedFrames.first,
             queueCount: activePrefetchedFrames.count,
+            queueTargetCount: effectivePrefetchTargetDepthLocked(for: activeScope),
             anyPrefetchInFlight: prefetchRequestsInFlight.values.contains(where: { $0 > 0 })
         )
     }
 
-    private func publishNavigationState() {
-        let snapshot = navigationPresentationSnapshot()
+    private func photoQueuePresentationSnapshotLocked() -> PhotoQueuePresentationSnapshot {
+        PhotoQueuePresentationSnapshot(
+            photoCount: prefetchedFrames.filter { $0.scope == .all }.count,
+            photoTargetCount: effectivePrefetchTargetDepthLocked(for: .all),
+            favoritePhotoCount: prefetchedFrames.filter { $0.scope == .favorites }.count,
+            favoritePhotoTargetCount: effectivePrefetchTargetDepthLocked(for: .favorites)
+        )
+    }
+
+    private func publishPhotoPrefetchQueueStates() {
+        let snapshot = stateQueue.sync {
+            photoQueuePresentationSnapshotLocked()
+        }
+
         updatePublishedState {
-            $0.previousImage = snapshot.previousFrame?.image
-            $0.nextImage = snapshot.nextFrame?.image
-            $0.isPrefetching = snapshot.anyPrefetchInFlight
+            $0.photoPrefetchQueueCount = snapshot.photoCount
+            $0.photoPrefetchQueueTargetCount = snapshot.photoTargetCount
+            $0.favoritePhotoPrefetchQueueCount = snapshot.favoritePhotoCount
+            $0.favoritePhotoPrefetchQueueTargetCount = snapshot.favoritePhotoTargetCount
+        }
+    }
+
+    private func publishNavigationState() {
+        let snapshot = stateQueue.sync { () -> (navigation: NavigationPresentationSnapshot, photoQueues: PhotoQueuePresentationSnapshot) in
+            (
+                navigationPresentationSnapshotLocked(),
+                photoQueuePresentationSnapshotLocked()
+            )
+        }
+        updatePublishedState {
+            $0.previousImage = snapshot.navigation.previousFrame?.image
+            $0.nextImage = snapshot.navigation.nextFrame?.image
+            $0.hasPreviousFrame = snapshot.navigation.previousFrame != nil
+            $0.hasNextFrame = snapshot.navigation.nextFrame != nil
+            $0.isPrefetching = snapshot.navigation.anyPrefetchInFlight
+            $0.prefetchQueueCount = snapshot.navigation.queueCount
+            $0.prefetchQueueTargetCount = snapshot.navigation.queueTargetCount
+            $0.photoPrefetchQueueCount = snapshot.photoQueues.photoCount
+            $0.photoPrefetchQueueTargetCount = snapshot.photoQueues.photoTargetCount
+            $0.favoritePhotoPrefetchQueueCount = snapshot.photoQueues.favoritePhotoCount
+            $0.favoritePhotoPrefetchQueueTargetCount = snapshot.photoQueues.favoritePhotoTargetCount
+        }
+    }
+
+    private func publishViewerStateSnapshot(
+        connectionStatus: String? = nil,
+        hostName: String? = nil,
+        updateHostName: Bool = false
+    ) {
+        let snapshot = stateQueue.sync {
+            (
+                navigation: navigationPresentationSnapshotLocked(),
+                photoQueues: photoQueuePresentationSnapshotLocked(),
+                frame: currentFrameState,
+                activeScope: activeSelectionScopeState
+            )
+        }
+
+        updatePublishedState {
+            $0.activeSelectionScope = snapshot.activeScope
+            $0.previousImage = snapshot.navigation.previousFrame?.image
+            $0.currentImage = snapshot.frame?.image
+            $0.currentImageURL = snapshot.frame?.fileURL
+            $0.currentFilename = snapshot.frame?.filename
+            $0.currentAssetID = snapshot.frame?.assetID
+            $0.currentMediaType = snapshot.frame?.mediaType
+            $0.currentImageIsFavorite = snapshot.frame?.isFavorite ?? false
+            $0.nextImage = snapshot.navigation.nextFrame?.image
+            $0.hasPreviousFrame = snapshot.navigation.previousFrame != nil
+            $0.hasNextFrame = snapshot.navigation.nextFrame != nil
+            $0.isLoadingImage = false
+            $0.isPrefetching = snapshot.navigation.anyPrefetchInFlight
+            $0.isUpdatingFavorite = false
+            $0.isDeletingImage = false
+            $0.prefetchQueueCount = snapshot.navigation.queueCount
+            $0.prefetchQueueTargetCount = snapshot.navigation.queueTargetCount
+            $0.photoPrefetchQueueCount = snapshot.photoQueues.photoCount
+            $0.photoPrefetchQueueTargetCount = snapshot.photoQueues.photoTargetCount
+            $0.favoritePhotoPrefetchQueueCount = snapshot.photoQueues.favoritePhotoCount
+            $0.favoritePhotoPrefetchQueueTargetCount = snapshot.photoQueues.favoritePhotoTargetCount
+            if let connectionStatus {
+                $0.connectionStatus = connectionStatus
+            }
+            if updateHostName {
+                $0.hostName = hostName
+            }
         }
     }
 
@@ -1314,6 +1883,7 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
 
     private func promoteHistoryFrame(_ frame: ViewerFrame, source: FrameActivationSource) {
         let activation = activateFrameInState(frame, source: source)
+        recordViewedMedia(mediaType: frame.mediaType)
 
         updatePublishedState {
             $0.previousImage = activation.snapshot.previousFrame?.image
@@ -1324,13 +1894,49 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             $0.currentMediaType = frame.mediaType
             $0.currentImageIsFavorite = frame.isFavorite
             $0.nextImage = activation.snapshot.nextFrame?.image
+            $0.hasPreviousFrame = activation.snapshot.previousFrame != nil
+            $0.hasNextFrame = activation.snapshot.nextFrame != nil
             $0.isLoadingImage = false
             $0.isPrefetching = activation.snapshot.anyPrefetchInFlight
+            $0.prefetchQueueCount = activation.snapshot.queueCount
+            $0.prefetchQueueTargetCount = activation.snapshot.queueTargetCount
             $0.errorMessage = nil
         }
 
         for staleURL in activation.staleURLs where staleURL != frame.fileURL {
             removeCachedMediaIfNeeded(at: staleURL)
+        }
+
+        scheduleViewerStatePersistence()
+        publishPhotoPrefetchQueueStates()
+    }
+
+    private func updateVideoCatalogFavorite(assetID: UUID, isFavorite: Bool) {
+        let activeScope = currentSelectionScope()
+        updatePublishedState {
+            if activeScope.favoritesOnly && isFavorite == false {
+                $0.videoCatalogItems.removeAll { $0.assetID == assetID }
+                return
+            }
+
+            $0.videoCatalogItems = $0.videoCatalogItems.map { item in
+                guard item.assetID == assetID else { return item }
+                return VideoCatalogItem(
+                    assetID: item.assetID,
+                    originalFilename: item.originalFilename,
+                    byteSize: item.byteSize,
+                    durationSeconds: item.durationSeconds,
+                    isFavorite: isFavorite,
+                    importedAt: item.importedAt,
+                    thumbnailURL: item.thumbnailURL
+                )
+            }
+        }
+    }
+
+    private func removeVideoCatalogItem(assetID: UUID) {
+        updatePublishedState {
+            $0.videoCatalogItems.removeAll { $0.assetID == assetID }
         }
     }
 
@@ -1345,7 +1951,11 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             }
             $0.previousImage = removalResult.snapshot.previousFrame?.image
             $0.nextImage = removalResult.snapshot.nextFrame?.image
+            $0.hasPreviousFrame = removalResult.snapshot.previousFrame != nil
+            $0.hasNextFrame = removalResult.snapshot.nextFrame != nil
             $0.isPrefetching = removalResult.snapshot.anyPrefetchInFlight
+            $0.prefetchQueueCount = removalResult.snapshot.queueCount
+            $0.prefetchQueueTargetCount = removalResult.snapshot.queueTargetCount
             $0.isUpdatingFavorite = false
             $0.errorMessage = nil
 
@@ -1357,6 +1967,8 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                     $0.currentAssetID = nil
                     $0.currentMediaType = nil
                     $0.currentImageIsFavorite = false
+                    $0.hasPreviousFrame = false
+                    $0.hasNextFrame = removalResult.snapshot.nextFrame != nil
                     $0.isLoadingImage = false
                 }
             }
@@ -1369,11 +1981,12 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             removeCachedMediaIfNeeded(at: removedCurrentFrame.fileURL)
         }
 
+        scheduleViewerStatePersistence()
         publishNavigationState()
         if shouldAdvanceFavorites {
             requestNextImage(in: activeScope)
-        } else if activeScope.favoritesOnly && !removalResult.staleURLs.isEmpty {
-            maintainPrefetchPipeline(for: activeScope)
+        } else {
+            maintainParallelPhotoPrefetchPipelines(prioritizing: activeScope)
         }
     }
 
@@ -1389,7 +2002,11 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             }
             $0.previousImage = removalResult.snapshot.previousFrame?.image
             $0.nextImage = removalResult.snapshot.nextFrame?.image
+            $0.hasPreviousFrame = removalResult.snapshot.previousFrame != nil
+            $0.hasNextFrame = removalResult.snapshot.nextFrame != nil
             $0.isPrefetching = removalResult.snapshot.anyPrefetchInFlight
+            $0.prefetchQueueCount = removalResult.snapshot.queueCount
+            $0.prefetchQueueTargetCount = removalResult.snapshot.queueTargetCount
             $0.isUpdatingFavorite = false
             $0.isDeletingImage = false
             $0.errorMessage = nil
@@ -1401,6 +2018,8 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
                 $0.currentAssetID = nil
                 $0.currentMediaType = nil
                 $0.currentImageIsFavorite = false
+                $0.hasPreviousFrame = false
+                $0.hasNextFrame = removalResult.snapshot.nextFrame != nil
                 $0.isLoadingImage = false
             }
         }
@@ -1410,11 +2029,13 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
         if let removedCurrentFrame {
             removeCachedMediaIfNeeded(at: removedCurrentFrame.fileURL)
+            scheduleViewerStatePersistence()
+            publishNavigationState()
             requestNextImage(in: activeScope)
-        } else if activeScope.favoritesOnly {
-            maintainPrefetchPipeline(for: activeScope)
         } else {
-            maintainPrefetchPipeline(for: activeScope)
+            scheduleViewerStatePersistence()
+            publishNavigationState()
+            maintainParallelPhotoPrefetchPipelines(prioritizing: activeScope)
         }
     }
 
@@ -1441,10 +2062,10 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
     }
 
-    private func resetTransientState() {
+    private func resetTransientState(preservingCachedFrames: Bool = false) {
         displayDecodeQueue.cancelAllOperations()
         prefetchDecodeQueue.cancelAllOperations()
-        stateQueue.sync {
+        let staleURLs = stateQueue.sync { () -> [URL] in
             invitedPeerIDs.removeAll()
             pendingResources.removeAll()
             pendingDeleteAssetID = nil
@@ -1453,31 +2074,179 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
             prefetchRequestsInFlight.removeAll()
             outstandingUploadCount = 0
 
+            var staleURLs = Array(receivedResources.values)
+            receivedResources.removeAll()
+
+            guard preservingCachedFrames == false else {
+                return staleURLs
+            }
+
             if let currentFrameState {
-                removeCachedMediaIfNeeded(at: currentFrameState.fileURL)
+                staleURLs.append(currentFrameState.fileURL)
             }
             currentFrameState = nil
 
-            for previousFrame in previousFrames {
-                removeCachedMediaIfNeeded(at: previousFrame.fileURL)
-            }
+            staleURLs.append(contentsOf: previousFrames.map(\.fileURL))
             previousFrames.removeAll()
 
-            for forwardFrame in forwardFrames {
-                removeCachedMediaIfNeeded(at: forwardFrame.fileURL)
-            }
+            staleURLs.append(contentsOf: forwardFrames.map(\.fileURL))
             forwardFrames.removeAll()
 
-            for prefetchedFrame in prefetchedFrames {
-                removeCachedMediaIfNeeded(at: prefetchedFrame.fileURL)
-            }
+            staleURLs.append(contentsOf: prefetchedFrames.map(\.fileURL))
             prefetchedFrames.removeAll()
 
-            for receivedURL in receivedResources.values {
-                removeCachedMediaIfNeeded(at: receivedURL)
-            }
-            receivedResources.removeAll()
+            return staleURLs
         }
+
+        for staleURL in staleURLs {
+            removeCachedMediaIfNeeded(at: staleURL)
+        }
+
+        if preservingCachedFrames == false {
+            scheduleViewerStatePersistence()
+        }
+    }
+
+    private func restorePersistedStateIfNeeded() {
+        let shouldRestore = stateQueue.sync { () -> Bool in
+            guard hasRestoredPersistedState == false else {
+                return false
+            }
+            hasRestoredPersistedState = true
+            return true
+        }
+        guard shouldRestore else { return }
+
+        guard FileManager.default.fileExists(atPath: persistedStateURL.path) else {
+            return
+        }
+
+        do {
+            let stateData = try Data(contentsOf: persistedStateURL)
+            let persistedState = try JSONDecoder().decode(PersistedViewerState.self, from: stateData)
+
+            let restoredCurrentFrame = try persistedState.currentFrame.flatMap { persistedFrame in
+                try restoredViewerFrame(from: persistedFrame)
+            }
+            let restoredPreviousFrames = try persistedState.previousFrames.compactMap { persistedFrame in
+                try restoredViewerFrame(from: persistedFrame)
+            }
+            let restoredForwardFrames = try persistedState.forwardFrames.compactMap { persistedFrame in
+                try restoredViewerFrame(from: persistedFrame)
+            }
+            let restoredPrefetchedFrames = try persistedState.prefetchedFrames.compactMap { persistedFrame in
+                try restoredViewerFrame(from: persistedFrame)
+            }
+
+            stateQueue.sync {
+                activeSelectionScopeState = persistedState.activeSelectionScope
+                currentFrameState = restoredCurrentFrame
+                previousFrames = restoredPreviousFrames
+                forwardFrames = restoredForwardFrames
+                prefetchedFrames = restoredPrefetchedFrames
+            }
+
+            persistViewerStateNow()
+        } catch {
+            updatePublishedState {
+                $0.errorMessage = "Failed to restore the client queue: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func scheduleViewerStatePersistence() {
+        let shouldSchedule = stateQueue.sync { () -> Bool in
+            guard viewerStatePersistenceScheduled == false else {
+                return false
+            }
+            viewerStatePersistenceScheduled = true
+            return true
+        }
+        guard shouldSchedule else { return }
+
+        persistenceQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.persistViewerStateNow()
+        }
+    }
+
+    private func persistViewerStateNow() {
+        let persistedState = stateQueue.sync { () -> PersistedViewerState in
+            viewerStatePersistenceScheduled = false
+
+            return PersistedViewerState(
+                version: 1,
+                activeSelectionScope: activeSelectionScopeState,
+                currentFrame: currentFrameState.flatMap { persistedViewerFrame(from: $0) },
+                previousFrames: previousFrames.compactMap { persistedViewerFrame(from: $0) },
+                forwardFrames: forwardFrames.compactMap { persistedViewerFrame(from: $0) },
+                prefetchedFrames: prefetchedFrames.compactMap { persistedViewerFrame(from: $0) }
+            )
+        }
+
+        do {
+            let encodedState = try JSONEncoder().encode(persistedState)
+            try encodedState.write(to: persistedStateURL, options: .atomic)
+        } catch {
+            updatePublishedState {
+                $0.errorMessage = "Failed to persist the client queue: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func persistedViewerFrame(from frame: ViewerFrame) -> PersistedViewerFrame? {
+        guard let relativeFilePath = relativeCachePath(for: frame.fileURL) else {
+            return nil
+        }
+
+        return PersistedViewerFrame(
+            assetID: frame.assetID,
+            mediaType: frame.mediaType,
+            relativeFilePath: relativeFilePath,
+            filename: frame.filename,
+            byteSize: frame.byteSize,
+            estimatedMemoryCost: frame.estimatedMemoryCost,
+            isFavorite: frame.isFavorite,
+            scope: frame.scope
+        )
+    }
+
+    private func restoredViewerFrame(from persistedFrame: PersistedViewerFrame) throws -> ViewerFrame? {
+        let fileURL = cacheDirectory.appending(path: persistedFrame.relativeFilePath)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return nil
+        }
+
+        let previewImage = decodePreviewImage(at: fileURL, mediaType: persistedFrame.mediaType)
+        if persistedFrame.mediaType == .photo, previewImage == nil {
+            try? FileManager.default.removeItem(at: fileURL)
+            return nil
+        }
+
+        return ViewerFrame(
+            assetID: persistedFrame.assetID,
+            mediaType: persistedFrame.mediaType,
+            image: previewImage,
+            fileURL: fileURL,
+            filename: persistedFrame.filename,
+            byteSize: persistedFrame.byteSize,
+            estimatedMemoryCost: previewImage == nil ? persistedFrame.estimatedMemoryCost : estimatedMemoryCost(for: previewImage),
+            isFavorite: persistedFrame.isFavorite,
+            scope: persistedFrame.scope
+        )
+    }
+
+    private func relativeCachePath(for fileURL: URL) -> String? {
+        guard fileURL.isFileURL else {
+            return nil
+        }
+
+        let cachePath = cacheDirectory.standardizedFileURL.path
+        let filePath = fileURL.standardizedFileURL.path
+        guard filePath.hasPrefix(cachePath + "/") else {
+            return nil
+        }
+
+        return String(filePath.dropFirst(cachePath.count + 1))
     }
 
     private static func defaultDisplayName() -> String {
@@ -1488,6 +2257,76 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         #else
         Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         #endif
+    }
+
+    private static func storedViewedTodayCounts() -> (photoCount: Int, videoCount: Int, totalCount: Int) {
+        let defaults = UserDefaults.standard
+        let todayKey = viewedTodayDateKey()
+        guard defaults.string(forKey: "SnapletViewedTodayDate") == todayKey else {
+            defaults.set(todayKey, forKey: "SnapletViewedTodayDate")
+            defaults.set(0, forKey: "SnapletViewedTodayCount")
+            defaults.set(0, forKey: "SnapletViewedTodayPhotoCount")
+            defaults.set(0, forKey: "SnapletViewedTodayVideoCount")
+            return (0, 0, 0)
+        }
+
+        let photoCount = defaults.integer(forKey: "SnapletViewedTodayPhotoCount")
+        let videoCount = defaults.integer(forKey: "SnapletViewedTodayVideoCount")
+        let totalCount = photoCount + videoCount
+        defaults.set(totalCount, forKey: "SnapletViewedTodayCount")
+        return (photoCount, videoCount, totalCount)
+    }
+
+    private static func incrementStoredViewedTodayCount(for mediaType: MediaType) -> (photoCount: Int, videoCount: Int, totalCount: Int) {
+        let defaults = UserDefaults.standard
+        let todayKey = viewedTodayDateKey()
+        if defaults.string(forKey: "SnapletViewedTodayDate") != todayKey {
+            defaults.set(todayKey, forKey: "SnapletViewedTodayDate")
+            defaults.set(0, forKey: "SnapletViewedTodayPhotoCount")
+            defaults.set(0, forKey: "SnapletViewedTodayVideoCount")
+            defaults.set(0, forKey: "SnapletViewedTodayCount")
+        }
+
+        switch mediaType {
+        case .photo:
+            defaults.set(defaults.integer(forKey: "SnapletViewedTodayPhotoCount") + 1, forKey: "SnapletViewedTodayPhotoCount")
+        case .video:
+            defaults.set(defaults.integer(forKey: "SnapletViewedTodayVideoCount") + 1, forKey: "SnapletViewedTodayVideoCount")
+        }
+
+        return storedViewedTodayCounts()
+    }
+
+    private static func storedTimeSpentTodaySeconds() -> TimeInterval {
+        let defaults = UserDefaults.standard
+        let todayKey = viewedTodayDateKey()
+        guard defaults.string(forKey: "SnapletTimeSpentTodayDate") == todayKey else {
+            defaults.set(todayKey, forKey: "SnapletTimeSpentTodayDate")
+            defaults.set(0, forKey: "SnapletTimeSpentTodaySeconds")
+            return 0
+        }
+        return defaults.double(forKey: "SnapletTimeSpentTodaySeconds")
+    }
+
+    private static func addStoredTimeSpentTodaySeconds(_ seconds: TimeInterval) -> TimeInterval {
+        let defaults = UserDefaults.standard
+        let todayKey = viewedTodayDateKey()
+        let currentSeconds: TimeInterval
+        if defaults.string(forKey: "SnapletTimeSpentTodayDate") == todayKey {
+            currentSeconds = defaults.double(forKey: "SnapletTimeSpentTodaySeconds")
+        } else {
+            defaults.set(todayKey, forKey: "SnapletTimeSpentTodayDate")
+            currentSeconds = 0
+        }
+
+        let nextSeconds = max(currentSeconds + max(seconds, 0), 0)
+        defaults.set(nextSeconds, forKey: "SnapletTimeSpentTodaySeconds")
+        return nextSeconds
+    }
+
+    private static func viewedTodayDateKey() -> String {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        return "\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
     }
 
     private static func makeDebugAutoUploadPayloads() -> [ImageUploadPayload] {
@@ -1560,23 +2399,18 @@ public final class PeerViewerService: NSObject, ObservableObject, @unchecked Sen
         }
 
         let decodeOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: previewImageMaximumPixelSize,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceShouldAllowFloat: true
         ] as CFDictionary
 
-        let imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
-        let rawOrientation = imageProperties?[kCGImagePropertyOrientation] as? UInt32 ?? 1
-        let cgOrientation = CGImagePropertyOrientation(rawValue: rawOrientation) ?? .up
-
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, decodeOptions) else {
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, decodeOptions) else {
             return nil
         }
 
-        return UIImage(
-            cgImage: cgImage,
-            scale: 1,
-            orientation: UIImage.Orientation(cgImagePropertyOrientation: cgOrientation)
-        )
+        return UIImage(cgImage: cgImage)
         #else
         return NSImage(contentsOf: url)
         #endif
@@ -1731,49 +2565,42 @@ extension PeerViewerService: MCSessionDelegate {
 
         updateSessionState(state)
 
-        updatePublishedState {
-            switch state {
-            case .notConnected:
-                self.resetTransientState()
-                if $0.hostName == peerID.displayName {
-                    $0.hostName = nil
-                }
-                $0.currentImage = nil
-                $0.currentImageURL = nil
-                $0.currentFilename = nil
-                $0.currentAssetID = nil
-                $0.currentMediaType = nil
-                $0.currentImageIsFavorite = false
-                $0.isLoadingImage = false
-                $0.isPrefetching = false
-                $0.isUpdatingFavorite = false
-                $0.isDeletingImage = false
-                $0.nextImage = nil
-                $0.connectionStatus = "Searching for your Mac…"
-            case .connecting:
-                self.stopBrowsing()
+        switch state {
+        case .notConnected:
+            resetTransientState(preservingCachedFrames: true)
+            publishViewerStateSnapshot(connectionStatus: "Searching for your Mac…", hostName: nil, updateHostName: true)
+        case .connecting:
+            stopBrowsing()
+            updatePublishedState {
                 $0.hostName = peerID.displayName
                 $0.connectionStatus = "Connecting to \(peerID.displayName)…"
-            case .connected:
-                self.stopBrowsing()
+            }
+        case .connected:
+            stopBrowsing()
+            updatePublishedState {
                 $0.hostName = peerID.displayName
                 $0.connectionStatus = "Connected to \(peerID.displayName)"
-            @unknown default:
+            }
+        @unknown default:
+            updatePublishedState {
                 $0.connectionStatus = "Unknown session state"
             }
         }
 
         if state == .notConnected {
             scheduleRecovery(afterDisconnecting: session)
+        } else if state == .connecting {
+            cancelScheduledRecovery()
         } else if state == .connected {
+            noteSuccessfulConnection()
             if scheduleDebugAutoUploadIfNeeded() {
                 updatePublishedState {
                     $0.uploadStatusMessage = "Preparing simulator upload validation…"
                 }
-            } else if currentAssetID == nil {
+            } else if currentAssetID == nil && currentSelectionScope().mediaType == .photo {
                 requestImage(purpose: .displayNow, scope: currentSelectionScope())
             } else {
-                maintainPrefetchPipeline(for: currentSelectionScope())
+                maintainParallelPhotoPrefetchPipelines(prioritizing: currentSelectionScope())
             }
         }
     }

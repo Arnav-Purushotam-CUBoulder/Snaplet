@@ -143,7 +143,9 @@ public struct ImageAsset: Identifiable, Codable, Equatable, Sendable {
     public let originalFilename: String
     public let storedFilename: String
     public let relativePath: String
+    public let thumbnailRelativePath: String?
     public let byteSize: Int64
+    public let durationSeconds: Double?
     public let isFavorite: Bool
     public let importedAt: Date
 
@@ -153,7 +155,9 @@ public struct ImageAsset: Identifiable, Codable, Equatable, Sendable {
         originalFilename: String,
         storedFilename: String,
         relativePath: String,
+        thumbnailRelativePath: String? = nil,
         byteSize: Int64,
+        durationSeconds: Double? = nil,
         isFavorite: Bool,
         importedAt: Date
     ) {
@@ -162,7 +166,9 @@ public struct ImageAsset: Identifiable, Codable, Equatable, Sendable {
         self.originalFilename = originalFilename
         self.storedFilename = storedFilename
         self.relativePath = relativePath
+        self.thumbnailRelativePath = thumbnailRelativePath
         self.byteSize = byteSize
+        self.durationSeconds = durationSeconds
         self.isFavorite = isFavorite
         self.importedAt = importedAt
     }
@@ -177,5 +183,9 @@ public struct ImageAsset: Identifiable, Codable, Equatable, Sendable {
 
     public func fileURL(relativeTo rootDirectory: URL) -> URL {
         rootDirectory.appending(path: relativePath)
+    }
+
+    public func thumbnailURL(relativeTo rootDirectory: URL) -> URL? {
+        thumbnailRelativePath.map { rootDirectory.appending(path: $0) }
     }
 }

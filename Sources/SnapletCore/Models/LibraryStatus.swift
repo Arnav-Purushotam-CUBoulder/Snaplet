@@ -31,4 +31,14 @@ public struct LibraryStatus: Equatable, Sendable {
     public var latestAsset: ImageAsset? {
         recentAssets.first
     }
+
+    public var summary: LibrarySummary {
+        LibrarySummary(
+            assetCount: assetCount,
+            photoCount: photoCount,
+            videoCount: videoCount,
+            favoritePhotoCount: favoritePhotoCount,
+            favoriteVideoCount: favoriteVideoCount
+        )
+    }
 }

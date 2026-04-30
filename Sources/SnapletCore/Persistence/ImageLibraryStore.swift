@@ -1,5 +1,8 @@
+import AVFoundation
 import Foundation
+import ImageIO
 import SQLite3
+import UniformTypeIdentifiers
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -12,6 +15,7 @@ public enum ImageLibraryStoreError: LocalizedError {
     case failedToDeleteFile(String)
     case failedToReadAttributes(String)
     case unsupportedMediaFile(String)
+    case assetNotFound(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -31,6 +35,8 @@ public enum ImageLibraryStoreError: LocalizedError {
             "Failed to read file attributes: \(message)"
         case let .unsupportedMediaFile(filename):
             "Unsupported media file: \(filename)"
+        case let .assetNotFound(assetID):
+            "Asset not found: \(assetID.uuidString)"
         }
     }
 }
@@ -85,7 +91,9 @@ private struct IndexedAssetSnapshot {
     let originalFilename: String
     let storedFilename: String
     let relativePath: String
+    let thumbnailRelativePath: String?
     let byteSize: Int64
+    let durationSeconds: Double?
     let mediaType: MediaType
     let isFavorite: Bool
     let importedAt: Date
@@ -93,7 +101,7 @@ private struct IndexedAssetSnapshot {
 
 private struct IndexedAssetLookup {
     var byRelativePath: [String: IndexedAssetSnapshot]
-    var byStoredFilename: [String: IndexedAssetSnapshot]
+    var byStoredFilename: [String: [IndexedAssetSnapshot]]
 }
 
 private struct LibraryCountSnapshot {
@@ -109,6 +117,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
     public let photosDirectory: URL
     public let videosDirectory: URL
     public let imagesDirectory: URL
+    public let thumbnailsDirectory: URL
     public let databaseURL: URL
 
     private let fileManager: FileManager
@@ -120,6 +129,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
         self.photosDirectory = rootDirectory.appending(path: MediaType.photo.directoryName, directoryHint: .isDirectory)
         self.videosDirectory = rootDirectory.appending(path: MediaType.video.directoryName, directoryHint: .isDirectory)
         self.imagesDirectory = photosDirectory
+        self.thumbnailsDirectory = rootDirectory.appending(path: "Thumbnails", directoryHint: .isDirectory)
         self.databaseURL = rootDirectory.appending(path: "snaplet.sqlite")
         self.fileManager = fileManager
 
@@ -135,7 +145,9 @@ public final class ImageLibraryStore: @unchecked Sendable {
                 original_filename TEXT NOT NULL,
                 stored_filename TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
+                thumbnail_relative_path TEXT,
                 byte_size INTEGER NOT NULL,
+                duration_seconds REAL,
                 imported_at REAL NOT NULL,
                 is_favorite INTEGER NOT NULL DEFAULT 0
             );
@@ -144,6 +156,8 @@ public final class ImageLibraryStore: @unchecked Sendable {
         )
         try Self.ensureFavoriteColumn(in: database)
         try Self.ensureMediaTypeColumn(in: database)
+        try Self.ensureThumbnailRelativePathColumn(in: database)
+        try Self.ensureDurationSecondsColumn(in: database)
         try Self.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_images_imported_at
@@ -183,6 +197,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
         _ = try migrateLegacyLibraryLayout()
         try fileManager.createDirectory(at: photosDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: videosDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: thumbnailsDirectory, withIntermediateDirectories: true)
     }
 
     deinit {
@@ -231,14 +246,14 @@ public final class ImageLibraryStore: @unchecked Sendable {
             let randomOffset = Int.random(in: 0..<matchingAssetCount)
             let sql = scope.favoritesOnly
                 ? """
-                SELECT id, media_type, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+                SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
                 FROM images
                 WHERE media_type = ? AND is_favorite = 1
                 ORDER BY imported_at DESC
                 LIMIT 1 OFFSET ?;
                 """
                 : """
-                SELECT id, media_type, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+                SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
                 FROM images
                 WHERE media_type = ?
                 ORDER BY imported_at DESC
@@ -271,6 +286,171 @@ public final class ImageLibraryStore: @unchecked Sendable {
         }
     }
 
+    public func videoCatalogAssets(
+        in scope: ImageSelectionScope,
+        sort: VideoCatalogSort,
+        limit: Int = 500
+    ) throws -> [ImageAsset] {
+        try withLock {
+            let normalizedScope: ImageSelectionScope = scope.favoritesOnly ? .favoriteVideos : .videos
+            try backfillMissingVideoDurationsLocked()
+            let sql: String
+            switch sort {
+            case .newest:
+                sql = normalizedScope.favoritesOnly
+                    ? """
+                    SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
+                    FROM images
+                    WHERE media_type = 'video' AND is_favorite = 1
+                    ORDER BY imported_at DESC
+                    LIMIT ?;
+                    """
+                    : """
+                    SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
+                    FROM images
+                    WHERE media_type = 'video'
+                    ORDER BY imported_at DESC
+                    LIMIT ?;
+                    """
+            case .durationAscending:
+                sql = normalizedScope.favoritesOnly
+                    ? """
+                    SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
+                    FROM images
+                    WHERE media_type = 'video' AND is_favorite = 1
+                    ORDER BY duration_seconds IS NULL, duration_seconds ASC, imported_at DESC
+                    LIMIT ?;
+                    """
+                    : """
+                    SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
+                    FROM images
+                    WHERE media_type = 'video'
+                    ORDER BY duration_seconds IS NULL, duration_seconds ASC, imported_at DESC
+                    LIMIT ?;
+                    """
+            case .durationDescending:
+                sql = normalizedScope.favoritesOnly
+                    ? """
+                    SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
+                    FROM images
+                    WHERE media_type = 'video' AND is_favorite = 1
+                    ORDER BY duration_seconds IS NULL, duration_seconds DESC, imported_at DESC
+                    LIMIT ?;
+                    """
+                    : """
+                    SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
+                    FROM images
+                    WHERE media_type = 'video'
+                    ORDER BY duration_seconds IS NULL, duration_seconds DESC, imported_at DESC
+                    LIMIT ?;
+                    """
+            }
+
+            let statement = try Self.prepare(sql, in: database)
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(limit))
+
+            var assets: [ImageAsset] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                assets.append(try Self.makeAsset(from: statement))
+            }
+            return assets
+        }
+    }
+
+    public func setVideoThumbnail(assetID: UUID, sourceURL: URL, originalFilename: String) throws -> ImageAsset {
+        try withLock {
+            guard let asset = try assetLocked(withID: assetID), asset.mediaType == .video else {
+                throw ImageLibraryStoreError.assetNotFound(assetID)
+            }
+
+            let normalizedExtension = URL(fileURLWithPath: originalFilename).pathExtension.lowercased()
+            let storedFilename = normalizedExtension.isEmpty
+                ? "\(assetID.uuidString)-thumbnail"
+                : "\(assetID.uuidString)-thumbnail.\(normalizedExtension)"
+            let destinationURL = thumbnailsDirectory.appending(path: storedFilename)
+
+            do {
+                try fileManager.createDirectory(at: thumbnailsDirectory, withIntermediateDirectories: true)
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            } catch {
+                throw ImageLibraryStoreError.failedToCopyFile(error.localizedDescription)
+            }
+
+            let thumbnailRelativePath = "Thumbnails/\(storedFilename)"
+            let statement = try Self.prepare(
+                """
+                UPDATE images
+                SET thumbnail_relative_path = ?
+                WHERE id = ? AND media_type = 'video';
+                """,
+                in: database
+            )
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_text(statement, 1, thumbnailRelativePath, -1, sqliteTransient)
+            sqlite3_bind_text(statement, 2, assetID.uuidString, -1, sqliteTransient)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
+            }
+
+            if let previousThumbnailURL = asset.thumbnailURL(relativeTo: rootDirectory),
+               previousThumbnailURL.standardizedFileURL != destinationURL.standardizedFileURL {
+                try? fileManager.removeItem(at: previousThumbnailURL)
+            }
+
+            guard let updatedAsset = try assetLocked(withID: assetID) else {
+                throw ImageLibraryStoreError.assetNotFound(assetID)
+            }
+            return updatedAsset
+        }
+    }
+
+    public func thumbnailURL(forVideoAsset asset: ImageAsset) throws -> URL? {
+        try withLock {
+            guard asset.mediaType == .video else {
+                return nil
+            }
+
+            if let thumbnailURL = asset.thumbnailURL(relativeTo: rootDirectory),
+               fileManager.fileExists(atPath: thumbnailURL.path) {
+                return thumbnailURL
+            }
+
+            let destinationURL = thumbnailsDirectory.appending(path: "\(asset.id.uuidString)-thumbnail.jpg")
+            if fileManager.fileExists(atPath: destinationURL.path) == false {
+                guard let thumbnailImage = try makeVideoThumbnailImage(for: asset) else {
+                    return nil
+                }
+                try writeJPEGThumbnail(thumbnailImage, to: destinationURL)
+            }
+
+            let thumbnailRelativePath = "Thumbnails/\(destinationURL.lastPathComponent)"
+            let statement = try Self.prepare(
+                """
+                UPDATE images
+                SET thumbnail_relative_path = ?
+                WHERE id = ? AND media_type = 'video';
+                """,
+                in: database
+            )
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_text(statement, 1, thumbnailRelativePath, -1, sqliteTransient)
+            sqlite3_bind_text(statement, 2, asset.id.uuidString, -1, sqliteTransient)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
+            }
+
+            return destinationURL
+        }
+    }
+
     public func libraryStatus(limit: Int = 30) throws -> LibraryStatus {
         try withLock {
             let counts = try libraryCountsLocked()
@@ -297,9 +477,15 @@ public final class ImageLibraryStore: @unchecked Sendable {
         }
     }
 
+    public func asset(withID assetID: UUID) throws -> ImageAsset? {
+        try withLock {
+            try assetLocked(withID: assetID)
+        }
+    }
+
     public func updateFavoriteStatus(assetID: UUID, isFavorite: Bool) throws -> ImageAsset? {
         try withLock {
-            guard try asset(withID: assetID) != nil else {
+            guard try assetLocked(withID: assetID) != nil else {
                 return nil
             }
 
@@ -320,13 +506,13 @@ public final class ImageLibraryStore: @unchecked Sendable {
                 throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
             }
 
-            return try asset(withID: assetID)
+            return try assetLocked(withID: assetID)
         }
     }
 
     public func deleteAsset(assetID: UUID) throws -> ImageAsset? {
         try withLock {
-            guard let asset = try asset(withID: assetID) else {
+            guard let asset = try assetLocked(withID: assetID) else {
                 return nil
             }
 
@@ -381,6 +567,10 @@ public final class ImageLibraryStore: @unchecked Sendable {
                 }
             }
 
+            if let thumbnailURL = asset.thumbnailURL(relativeTo: rootDirectory) {
+                try? fileManager.removeItem(at: thumbnailURL)
+            }
+
             return asset
         }
     }
@@ -410,14 +600,14 @@ public final class ImageLibraryStore: @unchecked Sendable {
         let sql: String
         if mediaType == nil {
             sql = """
-            SELECT id, media_type, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+            SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
             FROM images
             ORDER BY imported_at DESC
             LIMIT ?;
             """
         } else {
             sql = """
-            SELECT id, media_type, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+            SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
             FROM images
             WHERE media_type = ?
             ORDER BY imported_at DESC
@@ -530,6 +720,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
         }
 
         let byteSize = try byteSize(at: destinationURL)
+        let durationSeconds = mediaType == .video ? videoDurationSeconds(at: destinationURL) : nil
         let asset = ImageAsset(
             id: assetID,
             mediaType: mediaType,
@@ -537,6 +728,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
             storedFilename: storedFilename,
             relativePath: relativePath(for: storedFilename, mediaType: mediaType),
             byteSize: byteSize,
+            durationSeconds: durationSeconds,
             isFavorite: false,
             importedAt: Date()
         )
@@ -560,10 +752,12 @@ public final class ImageLibraryStore: @unchecked Sendable {
                 original_filename,
                 stored_filename,
                 relative_path,
+                thumbnail_relative_path,
                 byte_size,
+                duration_seconds,
                 imported_at,
                 is_favorite
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             in: database
         )
@@ -581,9 +775,19 @@ public final class ImageLibraryStore: @unchecked Sendable {
         sqlite3_bind_text(statement, 3, asset.originalFilename, -1, sqliteTransient)
         sqlite3_bind_text(statement, 4, asset.storedFilename, -1, sqliteTransient)
         sqlite3_bind_text(statement, 5, asset.relativePath, -1, sqliteTransient)
-        sqlite3_bind_int64(statement, 6, asset.byteSize)
-        sqlite3_bind_double(statement, 7, asset.importedAt.timeIntervalSince1970)
-        sqlite3_bind_int(statement, 8, asset.isFavorite ? 1 : 0)
+        if let thumbnailRelativePath = asset.thumbnailRelativePath {
+            sqlite3_bind_text(statement, 6, thumbnailRelativePath, -1, sqliteTransient)
+        } else {
+            sqlite3_bind_null(statement, 6)
+        }
+        sqlite3_bind_int64(statement, 7, asset.byteSize)
+        if let durationSeconds = asset.durationSeconds {
+            sqlite3_bind_double(statement, 8, durationSeconds)
+        } else {
+            sqlite3_bind_null(statement, 8)
+        }
+        sqlite3_bind_double(statement, 9, asset.importedAt.timeIntervalSince1970)
+        sqlite3_bind_int(statement, 10, asset.isFavorite ? 1 : 0)
     }
 
     private func migrateLegacyLibraryLayoutLocked() throws -> MediaLibraryMigrationSummary {
@@ -648,10 +852,12 @@ public final class ImageLibraryStore: @unchecked Sendable {
                 original_filename,
                 stored_filename,
                 relative_path,
+                thumbnail_relative_path,
                 byte_size,
+                duration_seconds,
                 imported_at,
                 is_favorite
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             in: database
         )
@@ -660,6 +866,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
         var indexedPhotoCount = 0
         var indexedVideoCount = 0
         var skippedFileCount = 0
+        var reusedAssetIDs: Set<UUID> = []
 
         do {
             try Self.execute("BEGIN IMMEDIATE TRANSACTION;", in: database)
@@ -689,8 +896,13 @@ public final class ImageLibraryStore: @unchecked Sendable {
 
                     let relativePath = try relativePathString(for: fileURL, relativeTo: rootDirectory)
                     let storedFilename = fileURL.lastPathComponent
-                    let existingSnapshot = existingLookup.byRelativePath[relativePath]
-                        ?? existingLookup.byStoredFilename[storedFilename]
+                    let existingSnapshot = existingSnapshot(
+                        for: relativePath,
+                        storedFilename: storedFilename,
+                        mediaType: mediaType,
+                        from: existingLookup,
+                        excluding: reusedAssetIDs
+                    )
 
                     let asset = ImageAsset(
                         id: existingSnapshot?.id ?? UUID(),
@@ -698,7 +910,11 @@ public final class ImageLibraryStore: @unchecked Sendable {
                         originalFilename: existingSnapshot?.originalFilename ?? storedFilename,
                         storedFilename: storedFilename,
                         relativePath: relativePath,
+                        thumbnailRelativePath: existingSnapshot?.thumbnailRelativePath,
                         byteSize: try byteSize(at: fileURL),
+                        durationSeconds: mediaType == .video
+                            ? (existingSnapshot?.durationSeconds ?? videoDurationSeconds(at: fileURL))
+                            : nil,
                         isFavorite: existingSnapshot?.isFavorite ?? false,
                         importedAt: existingSnapshot?.importedAt ?? fileDate(for: fileURL)
                     )
@@ -709,6 +925,10 @@ public final class ImageLibraryStore: @unchecked Sendable {
 
                     guard sqlite3_step(insertStatement) == SQLITE_DONE else {
                         throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
+                    }
+
+                    if let existingSnapshot {
+                        reusedAssetIDs.insert(existingSnapshot.id)
                     }
 
                     switch mediaType {
@@ -739,7 +959,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
     private func existingAssetLookup() throws -> IndexedAssetLookup {
         let statement = try Self.prepare(
             """
-            SELECT id, media_type, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+            SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
             FROM images;
             """,
             in: database
@@ -747,7 +967,7 @@ public final class ImageLibraryStore: @unchecked Sendable {
         defer { sqlite3_finalize(statement) }
 
         var byRelativePath: [String: IndexedAssetSnapshot] = [:]
-        var byStoredFilename: [String: IndexedAssetSnapshot] = [:]
+        var byStoredFilename: [String: [IndexedAssetSnapshot]] = [:]
 
         while sqlite3_step(statement) == SQLITE_ROW {
             let asset = try Self.makeAsset(from: statement)
@@ -756,17 +976,80 @@ public final class ImageLibraryStore: @unchecked Sendable {
                 originalFilename: asset.originalFilename,
                 storedFilename: asset.storedFilename,
                 relativePath: asset.relativePath,
+                thumbnailRelativePath: asset.thumbnailRelativePath,
                 byteSize: asset.byteSize,
+                durationSeconds: asset.durationSeconds,
                 mediaType: asset.mediaType,
                 isFavorite: asset.isFavorite,
                 importedAt: asset.importedAt
             )
 
             byRelativePath[snapshot.relativePath] = snapshot
-            byStoredFilename[snapshot.storedFilename] = snapshot
+            byStoredFilename[snapshot.storedFilename, default: []].append(snapshot)
         }
 
         return IndexedAssetLookup(byRelativePath: byRelativePath, byStoredFilename: byStoredFilename)
+    }
+
+    private func backfillMissingVideoDurationsLocked() throws {
+        let statement = try Self.prepare(
+            """
+            SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
+            FROM images
+            WHERE media_type = 'video' AND duration_seconds IS NULL;
+            """,
+            in: database
+        )
+        defer { sqlite3_finalize(statement) }
+
+        var missingDurationAssets: [ImageAsset] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            missingDurationAssets.append(try Self.makeAsset(from: statement))
+        }
+
+        for asset in missingDurationAssets {
+            guard let durationSeconds = videoDurationSeconds(at: asset.fileURL(relativeTo: rootDirectory)) else {
+                continue
+            }
+            try updateVideoDurationLocked(assetID: asset.id, durationSeconds: durationSeconds)
+        }
+    }
+
+    private func updateVideoDurationLocked(assetID: UUID, durationSeconds: Double) throws {
+        let statement = try Self.prepare(
+            """
+            UPDATE images
+            SET duration_seconds = ?
+            WHERE id = ? AND media_type = 'video';
+            """,
+            in: database
+        )
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_double(statement, 1, durationSeconds)
+        sqlite3_bind_text(statement, 2, assetID.uuidString, -1, sqliteTransient)
+
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw ImageLibraryStoreError.failedToExecuteStatement(Self.lastErrorMessage(in: database))
+        }
+    }
+
+    private func existingSnapshot(
+        for relativePath: String,
+        storedFilename: String,
+        mediaType: MediaType,
+        from lookup: IndexedAssetLookup,
+        excluding usedAssetIDs: Set<UUID>
+    ) -> IndexedAssetSnapshot? {
+        if let exactMatch = lookup.byRelativePath[relativePath],
+           exactMatch.mediaType == mediaType,
+           usedAssetIDs.contains(exactMatch.id) == false {
+            return exactMatch
+        }
+
+        return lookup.byStoredFilename[storedFilename]?.first { snapshot in
+            snapshot.mediaType == mediaType && usedAssetIDs.contains(snapshot.id) == false
+        }
     }
 
     private func legacyDirectoryURLs() -> [URL] {
@@ -912,6 +1195,62 @@ public final class ImageLibraryStore: @unchecked Sendable {
         }
     }
 
+    private func videoDurationSeconds(at fileURL: URL) -> Double? {
+        let seconds = AVURLAsset(url: fileURL).duration.seconds
+        guard seconds.isFinite, seconds > 0 else {
+            return nil
+        }
+        return seconds
+    }
+
+    private func makeVideoThumbnailImage(for asset: ImageAsset) throws -> CGImage? {
+        let videoURL = asset.fileURL(relativeTo: rootDirectory)
+        guard fileManager.fileExists(atPath: videoURL.path) else {
+            return nil
+        }
+
+        let avAsset = AVURLAsset(url: videoURL)
+        let generator = AVAssetImageGenerator(asset: avAsset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 960, height: 960)
+
+        for time in [CMTime(seconds: 0.1, preferredTimescale: 600), .zero] {
+            if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
+                return cgImage
+            }
+        }
+
+        return nil
+    }
+
+    private func writeJPEGThumbnail(_ image: CGImage, to destinationURL: URL) throws {
+        do {
+            try fileManager.createDirectory(at: thumbnailsDirectory, withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+        } catch {
+            throw ImageLibraryStoreError.failedToCopyFile(error.localizedDescription)
+        }
+
+        guard let destination = CGImageDestinationCreateWithURL(
+            destinationURL as CFURL,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw ImageLibraryStoreError.failedToCopyFile("Could not create a thumbnail image destination.")
+        }
+
+        CGImageDestinationAddImage(destination, image, [
+            kCGImageDestinationLossyCompressionQuality: 0.82
+        ] as CFDictionary)
+
+        guard CGImageDestinationFinalize(destination) else {
+            throw ImageLibraryStoreError.failedToCopyFile("Could not write the generated thumbnail.")
+        }
+    }
+
     private func fileDate(for fileURL: URL) -> Date {
         let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
         return resourceValues?.contentModificationDate
@@ -1025,6 +1364,34 @@ public final class ImageLibraryStore: @unchecked Sendable {
         )
     }
 
+    private static func ensureThumbnailRelativePathColumn(in database: OpaquePointer?) throws {
+        guard try tableHasColumn(named: "thumbnail_relative_path", in: "images", database: database) == false else {
+            return
+        }
+
+        try execute(
+            """
+            ALTER TABLE images
+            ADD COLUMN thumbnail_relative_path TEXT;
+            """,
+            in: database
+        )
+    }
+
+    private static func ensureDurationSecondsColumn(in database: OpaquePointer?) throws {
+        guard try tableHasColumn(named: "duration_seconds", in: "images", database: database) == false else {
+            return
+        }
+
+        try execute(
+            """
+            ALTER TABLE images
+            ADD COLUMN duration_seconds REAL;
+            """,
+            in: database
+        )
+    }
+
     private static func tableHasColumn(named columnName: String, in tableName: String, database: OpaquePointer?) throws -> Bool {
         let statement = try prepare("PRAGMA table_info(\(tableName));", in: database)
         defer { sqlite3_finalize(statement) }
@@ -1042,10 +1409,10 @@ public final class ImageLibraryStore: @unchecked Sendable {
         return false
     }
 
-    private func asset(withID assetID: UUID) throws -> ImageAsset? {
+    private func assetLocked(withID assetID: UUID) throws -> ImageAsset? {
         let statement = try Self.prepare(
             """
-            SELECT id, media_type, original_filename, stored_filename, relative_path, byte_size, imported_at, is_favorite
+            SELECT id, media_type, original_filename, stored_filename, relative_path, thumbnail_relative_path, byte_size, duration_seconds, imported_at, is_favorite
             FROM images
             WHERE id = ?
             LIMIT 1;
@@ -1082,6 +1449,10 @@ public final class ImageLibraryStore: @unchecked Sendable {
         let mediaTypeString = String(cString: mediaTypePointer)
         let storedFilename = String(cString: storedFilenamePointer)
         let relativePath = String(cString: relativePathPointer)
+        let thumbnailRelativePath = sqlite3_column_text(statement, 5).map { String(cString: $0) }
+        let durationSeconds: Double? = sqlite3_column_type(statement, 7) == SQLITE_NULL
+            ? nil
+            : sqlite3_column_double(statement, 7)
         let inferredMediaType = MediaType(rawValue: mediaTypeString)
             ?? MediaType.infer(fromPathExtension: URL(fileURLWithPath: storedFilename).pathExtension)
             ?? MediaType.infer(fromPathExtension: URL(fileURLWithPath: relativePath).pathExtension)
@@ -1093,9 +1464,11 @@ public final class ImageLibraryStore: @unchecked Sendable {
             originalFilename: String(cString: originalFilenamePointer),
             storedFilename: storedFilename,
             relativePath: relativePath,
-            byteSize: sqlite3_column_int64(statement, 5),
-            isFavorite: sqlite3_column_int(statement, 7) != 0,
-            importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+            thumbnailRelativePath: thumbnailRelativePath,
+            byteSize: sqlite3_column_int64(statement, 6),
+            durationSeconds: durationSeconds,
+            isFavorite: sqlite3_column_int(statement, 9) != 0,
+            importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 8))
         )
     }
 

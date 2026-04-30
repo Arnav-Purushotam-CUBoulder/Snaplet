@@ -2,26 +2,33 @@
 
 Snaplet is a native Swift setup with:
 
-- A macOS host dashboard that imports images into an external-drive image store.
+- A macOS host dashboard that imports photos and videos into an external-drive media store.
 - A SQLite index that tracks every imported file.
-- An iPhone viewer that requests a random indexed image every time you pull down.
+- An iPhone viewer with random photo/video feeds, favorites feeds, and a separate video album tab.
 - MultipeerConnectivity transport between the Mac and iPhone.
 
 ## Architecture
 
 ### Mac host
 
-- Imported images are copied into `/Volumes/Seagate Expansion Drive/Snaplet/HostData/Images/`.
+- Imported photos and videos are copied into `/Volumes/Seagate Expansion Drive/Snaplet/HostData/Photos/` and `/Volumes/Seagate Expansion Drive/Snaplet/HostData/Videos/`.
+- Custom and generated video thumbnails are stored in `/Volumes/Seagate Expansion Drive/Snaplet/HostData/Thumbnails/`.
 - Metadata is written into `/Volumes/Seagate Expansion Drive/Snaplet/HostData/snaplet.sqlite`.
 - The host will not silently fall back to internal storage. If `Seagate Expansion Drive` is not mounted, the host dashboard shows a clear error and does not start the library service.
 - The Mac advertises a local MultipeerConnectivity service.
-- When the viewer requests the next image, the host runs `ORDER BY RANDOM() LIMIT 1` against SQLite and transfers that file back to the iPhone.
+- Random feeds request one SQLite-selected asset at a time.
+- The video album requests a fixed-order catalog with thumbnail URLs, favorite state, file size, and video duration. Missing legacy durations are backfilled when the catalog is requested so length sorting works on older indexed videos too.
 
 ### iPhone viewer
 
 - The viewer discovers the Mac host and connects automatically.
-- On first connection, and on each downward swipe, it sends a `requestRandomImage` message.
-- The transferred file is cached locally and rendered full-screen.
+- Photos, Favorite Photos, Videos, and Favorite Videos are random full-screen feeds.
+- Video playback supports audio, pause/play, mute/unmute, swipe up/down navigation, and tap-to-hide controls for an immersive full-screen view.
+- Video Album is a separate top-bar tab with thumbnails, all/favorites filtering, newest/shortest/longest sorting, multi-select, batch delete, and tap-to-open playback.
+- Video thumbnails can be replaced from the iPhone photo picker and are persisted on the Mac host.
+- Upload from iPhone supports both photos and videos.
+- Horizontal swipes switch between top-bar tabs and briefly reveal the top bar before it fades away.
+- The menu tracks library counts, favorite counts, per-session views, photos/videos viewed today, and time spent in the app today.
 
 ## Important transport note
 
@@ -32,7 +39,8 @@ This project uses `MultipeerConnectivity`, which is the most practical Apple-nat
 - `swift build`
 - `swift run SnapletSmokeTests`
 - `xcrun swiftc -typecheck ... Apps/iOSViewer/*.swift`
-- `xcodebuild -project Snaplet.xcodeproj -scheme SnapletHost -configuration Debug -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO`
+- `./Scripts/build-host.sh`
+- Physical iPhone build/install via `xcodebuild ... -destination 'platform=iOS,id=...'` and `xcrun devicectl device install app ...`
 - iOS Simulator run on `iPhone 17 Pro (iOS 26.4)` succeeded
 - End-to-end simulator validation confirmed:
   - the viewer connected to the Mac host over `MultipeerConnectivity`
@@ -40,7 +48,13 @@ This project uses `MultipeerConnectivity`, which is the most practical Apple-nat
   - the viewer cached the transferred file
   - SHA-256 hashes matched between the host copy and simulator cache copy, confirming lossless transfer
 
-Physical iPhone installation is still blocked by Apple provisioning on this machine because Xcode could not log into the configured developer account to create a development profile.
+## Host Build Rule
+
+Only one `SnapletHost.app` should exist on a development machine at a time.
+
+- Use `./Scripts/build-host.sh` for local macOS host builds.
+- The canonical output path is `.build/xcode/host/Build/Products/Debug/SnapletHost.app`.
+- The script prunes older `SnapletHost.app` bundles from repo-local build folders and Xcode `DerivedData` after a successful build.
 
 ## Generate the Xcode project
 
@@ -52,4 +66,4 @@ open Snaplet.xcodeproj
 ## What still needs Xcode
 
 - Valid Apple Developer account credentials in Xcode for physical iPhone install/signing.
-- Optional live validation of the iPhone photo-picker upload flow on a physical device.
+- Optional live validation of large video transfers and custom thumbnail replacement on a physical device.

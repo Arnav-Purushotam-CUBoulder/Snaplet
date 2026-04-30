@@ -36,6 +36,7 @@ struct HostDashboardView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     header
                     actionRow
+                    warmCacheSection
 
                     if let feedback = model.importFeedback {
                         statusBanner(feedback, tint: .green)
@@ -173,6 +174,16 @@ struct HostDashboardView: View {
         }
     }
 
+    private var warmCacheSection: some View {
+        Group {
+            if let hostService = model.hostService {
+                HostWarmCacheBanner(service: hostService)
+            } else {
+                HostWarmCacheBannerPlaceholder()
+            }
+        }
+    }
+
     private var contentSection: some View {
         HStack(alignment: .top, spacing: 20) {
             RecentMediaPanel(assets: model.libraryStatus.recentAssets)
@@ -276,6 +287,163 @@ private struct HostAdvertisingCard: View {
             value: service.isAdvertising ? "Live" : "Stopped",
             subtitle: service.connectionStatus,
             tint: Color(red: 0.08, green: 0.27, blue: 0.55)
+        )
+    }
+}
+
+private struct HostWarmCacheBanner: View {
+    @ObservedObject var service: PeerHostService
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 22) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("WARM CACHE QUEUES")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text("Regular and favorite photos already staged on the Mac SSD for instant transfers.")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 14) {
+                    HostWarmCachePill(
+                        title: "Photos",
+                        value: "\(service.preparedPhotoQueueCount) / \(service.preparedPhotoQueueTargetCount)",
+                        tint: Color(red: 0.68, green: 0.42, blue: 0.19)
+                    )
+                    HostWarmCachePill(
+                        title: "Favorites",
+                        value: "\(service.preparedFavoritePhotoQueueCount) / \(service.preparedFavoritePhotoQueueTargetCount)",
+                        tint: Color(red: 0.79, green: 0.57, blue: 0.19)
+                    )
+                }
+            }
+
+            Spacer(minLength: 20)
+
+            VStack(alignment: .trailing, spacing: 12) {
+                HostWarmCacheMetric(
+                    title: "PHOTOS READY",
+                    count: service.preparedPhotoQueueCount,
+                    target: service.preparedPhotoQueueTargetCount,
+                    accent: Color(red: 0.39, green: 0.23, blue: 0.10)
+                )
+
+                HostWarmCacheMetric(
+                    title: "FAVORITES READY",
+                    count: service.preparedFavoritePhotoQueueCount,
+                    target: service.preparedFavoritePhotoQueueTargetCount,
+                    accent: Color(red: 0.54, green: 0.39, blue: 0.10)
+                )
+            }
+        }
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Color(red: 0.64, green: 0.46, blue: 0.24).opacity(0.16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.08), radius: 22, x: 0, y: 18)
+        )
+    }
+}
+
+private struct HostWarmCachePill: View {
+    let title: String
+    let value: String
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text(value)
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(tint.opacity(0.14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(.white.opacity(0.28), lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct HostWarmCacheMetric: View {
+    let title: String
+    let count: Int
+    let target: Int
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text("\(count)")
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .foregroundStyle(accent)
+
+            Text("Target \(target)")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct HostWarmCacheBannerPlaceholder: View {
+    var body: some View {
+        HStack(alignment: .center, spacing: 22) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("WARM CACHE QUEUES")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text("Offline")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+
+                Text("Host service unavailable.")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 20)
+
+            VStack(alignment: .trailing, spacing: 12) {
+                HostWarmCacheMetric(
+                    title: "PHOTOS READY",
+                    count: 0,
+                    target: 0,
+                    accent: .secondary
+                )
+                HostWarmCacheMetric(
+                    title: "FAVORITES READY",
+                    count: 0,
+                    target: 0,
+                    accent: .secondary
+                )
+            }
+        }
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.white.opacity(0.38))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.08), radius: 22, x: 0, y: 18)
         )
     }
 }

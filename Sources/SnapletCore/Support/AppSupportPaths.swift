@@ -37,17 +37,90 @@ public enum AppSupportPaths {
     }
 
     public static func viewerCacheDirectory(appName: String = "Snaplet") throws -> URL {
-        let directory = try FileManager.default.url(
+        let root = try persistentLocalDirectory(
+            named: "ViewerCache",
+            appName: appName,
+            migrateFromLegacyCachesDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    public static func hostQueueCacheDirectory(appName: String = "Snaplet") throws -> URL {
+        let root = try persistentLocalDirectory(
+            named: "HostQueueCache",
+            appName: appName,
+            migrateFromLegacyCachesDirectory: false
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private static func persistentLocalDirectory(
+        named directoryName: String,
+        appName: String,
+        migrateFromLegacyCachesDirectory: Bool
+    ) throws -> URL {
+        let applicationSupportDirectory = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let appRoot = applicationSupportDirectory
+            .appending(path: appName, directoryHint: .isDirectory)
+        let destination = appRoot.appending(path: directoryName, directoryHint: .isDirectory)
+
+        if migrateFromLegacyCachesDirectory {
+            try migrateLegacyDirectoryIfNeeded(
+                named: directoryName,
+                appName: appName,
+                destination: destination
+            )
+        }
+
+        return destination
+    }
+
+    private static func migrateLegacyDirectoryIfNeeded(
+        named directoryName: String,
+        appName: String,
+        destination: URL
+    ) throws {
+        let fileManager = FileManager.default
+        let legacyCachesDirectory = try fileManager.url(
             for: .cachesDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
         )
-        let root = directory
+        let legacyDirectory = legacyCachesDirectory
             .appending(path: appName, directoryHint: .isDirectory)
-            .appending(path: "ViewerCache", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        return root
+            .appending(path: directoryName, directoryHint: .isDirectory)
+
+        guard fileManager.fileExists(atPath: legacyDirectory.path) else {
+            return
+        }
+
+        let destinationExists = fileManager.fileExists(atPath: destination.path)
+        if destinationExists {
+            let destinationContents = try fileManager.contentsOfDirectory(
+                at: destination,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+            guard destinationContents.isEmpty else {
+                return
+            }
+            try fileManager.removeItem(at: destination)
+        } else {
+            try fileManager.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        }
+
+        try fileManager.moveItem(at: legacyDirectory, to: destination)
     }
 
     private static func mountedHostVolumeURL(named volumeName: String) throws -> URL {

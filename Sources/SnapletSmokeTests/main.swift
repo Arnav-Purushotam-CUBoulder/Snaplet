@@ -5,6 +5,7 @@ import SnapletCore
 enum SnapletSmokeTests {
     static func main() throws {
         try verifyImageLibraryStore()
+        try verifyReindexHandlesDuplicateStoredFilenames()
         try verifyPeerMessageRoundTrip()
         try verifyMediaStreamingServer()
         print("Snaplet smoke tests passed.")
@@ -49,6 +50,44 @@ enum SnapletSmokeTests {
         try assert(uploadedAsset.originalFilename == "three.png", "Expected received uploads to preserve the provided original filename.")
         try assert(uploadedAsset.storedFilename.hasSuffix(".png"), "Expected received uploads to use the original filename extension when storing the file.")
         try assert(favoritedAsset?.isFavorite == true, "Expected favorite update to persist in SQLite.")
+    }
+
+    private static func verifyReindexHandlesDuplicateStoredFilenames() throws {
+        let fileManager = FileManager.default
+        let temporaryRoot = fileManager.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let sourceRoot = fileManager.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+
+        try fileManager.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        defer {
+            try? fileManager.removeItem(at: temporaryRoot)
+            try? fileManager.removeItem(at: sourceRoot)
+        }
+
+        let sourceVideo = sourceRoot.appending(path: "clip.mp4")
+        try Data("video-one".utf8).write(to: sourceVideo)
+
+        let store = try ImageLibraryStore(rootDirectory: temporaryRoot)
+        let importedAssets = try store.importAssets(from: [sourceVideo])
+        guard let importedVideo = importedAssets.first else {
+            throw SmokeTestFailure(message: "Expected video import to create an indexed asset.")
+        }
+
+        let nestedVideoDirectory = temporaryRoot
+            .appending(path: "Videos", directoryHint: .isDirectory)
+            .appending(path: "nested", directoryHint: .isDirectory)
+        try fileManager.createDirectory(at: nestedVideoDirectory, withIntermediateDirectories: true)
+
+        let duplicateStoredFilenameURL = nestedVideoDirectory.appending(path: importedVideo.storedFilename)
+        try Data("video-two".utf8).write(to: duplicateStoredFilenameURL)
+
+        let summary = try store.reindexLibrary()
+        let status = try store.libraryStatus(limit: 10)
+        let indexedVideos = try store.recentAssets(limit: 10, mediaType: .video)
+
+        try assert(summary.indexedVideoCount == 2, "Expected reindex to keep both duplicate video filenames.")
+        try assert(status.videoCount == 2, "Expected SQLite status to report both duplicate video filenames.")
+        try assert(Set(indexedVideos.map(\.id)).count == 2, "Expected duplicate stored filenames to keep distinct asset IDs.")
     }
 
     private static func verifyPeerMessageRoundTrip() throws {
